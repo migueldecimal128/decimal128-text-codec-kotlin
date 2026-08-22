@@ -141,6 +141,10 @@ object Decimal128TextCodec {
      *  - Plain decimal notation: `"0"`, `"-1.5"`, `"123.456"`, `"0.0001"`
      *  - Scientific notation: `"1.5E10"`, `"-2.3e-7"`, `"6.02E+23"`. Both
      *    `E` and `e` are accepted as the exponent separator.
+     *  - Digit separators: `_` between two digits, in either the coefficient
+     *    or the exponent (`"1_000"`, `"1.234_567"`, `"1e1_0"`). An underscore
+     *    must be both preceded and followed by a digit, so `"1_"`, `"_1"`,
+     *    `"1__2"`, `"1_.5"` and `"1._5"` are all rejected.
      *  - Special values: `"Infinity"`, `"Inf"`,
      *    `"NaN"`, `"qNaN"`, and `"sNaN"`, optionally with a
      *    leading sign (`"-INF") and a NaN payload (`"NaN123"`, `"-sNaN42"`).
@@ -819,6 +823,10 @@ object Decimal128TextCodec {
         var significantDigitCount = 0 // does not count leading zeros
         var hasDot = false
         var expSign = false
+        // an underscore is a digit separator: legal only between two digits,
+        // so it must follow a digit and the next character must be a digit too
+        var prevWasDigit = false
+        var afterUnderscore = false
 
         verify { chFirst.code != 0 }
         var ch = chFirst
@@ -827,7 +835,7 @@ object Decimal128TextCodec {
         var accum19b = 0L
         var exp = 0
 
-        while (ch in '0'..'9' || ch == '.') {
+        while (ch in '0'..'9' || ch == '.' || ch == '_') {
             when (ch) {
                 in '0'..'9' -> {
                     val d = ch - '0'
@@ -845,15 +853,31 @@ object Decimal128TextCodec {
                     }
                     if (hasDot)
                         ++fractionalDigitCount
+                    prevWasDigit = true
+                    afterUnderscore = false
+                }
+
+                '_' -> when {
+                    !prevWasDigit -> return "invalid underscore location"
+                    else -> {
+                        prevWasDigit = false
+                        afterUnderscore = true
+                    }
                 }
 
                 '.' -> when {
+                    afterUnderscore -> return "invalid underscore location"
                     hasDot -> return "double radix dot"
-                    else -> hasDot = true
+                    else -> {
+                        hasDot = true
+                        prevWasDigit = false
+                    }
                 }
             }
             ch = txt.nextChar()
         }
+        if (afterUnderscore)
+            return "invalid underscore location"
         if (!hasCoefficientDigit)
             return "no coefficient digit"
         // this path has at least one digit
@@ -865,15 +889,33 @@ object Decimal128TextCodec {
             }
             var hasExpDigit = false
             var expSignificantDigitCount = 0
-            while (ch in '0'..'9') {
-                hasExpDigit = true
-                val eDigit = ch - '0'
-                // count while flushing leading zeros
-                expSignificantDigitCount +=
-                    (-(expSignificantDigitCount or eDigit)) ushr 31
-                exp = exp * 10 + eDigit
+            prevWasDigit = false
+            afterUnderscore = false
+            while (ch in '0'..'9' || ch == '_') {
+                when (ch) {
+                    '_' -> when {
+                        !prevWasDigit -> return "invalid underscore location"
+                        else -> {
+                            prevWasDigit = false
+                            afterUnderscore = true
+                        }
+                    }
+
+                    else -> {
+                        hasExpDigit = true
+                        val eDigit = ch - '0'
+                        // count while flushing leading zeros
+                        expSignificantDigitCount +=
+                            (-(expSignificantDigitCount or eDigit)) ushr 31
+                        exp = exp * 10 + eDigit
+                        prevWasDigit = true
+                        afterUnderscore = false
+                    }
+                }
                 ch = txt.nextChar()
             }
+            if (afterUnderscore)
+                return "invalid underscore location"
             if (!hasExpDigit)
                 return "no exponent digit"
             // clamp exp to 9999 once after the loop
