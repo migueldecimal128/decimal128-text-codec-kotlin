@@ -191,6 +191,7 @@ object Decimal128TextCodec {
     private const val MAX_PAYLOAD_LO = MIN_PRECISION_34_COEFF_LO - 1L
 
     private const val ascii_minus: Byte = 0x2D
+    private const val ascii_plus: Byte = 0x2B
     private const val ascii_0: Byte = 0x30
     private const val ascii_dot: Byte = 0x2E
     private const val ascii_E: Byte = 0x45
@@ -322,7 +323,11 @@ object Decimal128TextCodec {
             val index = -qExp + (signBit shl 3)
             return ZEROS[index and 0x0F]
         }
-        val base = if (sign) "-0E" else "0E"
+        val base = if (qExp > 0) {
+            if (sign) "-0E+" else "0E+"
+        } else {
+            if (sign) "-0E" else "0E"
+        }
         return base + qExp.toString()
     }
 
@@ -400,13 +405,13 @@ object Decimal128TextCodec {
 
     /**
      * Format a finite non-zero BID128 value in normalized scientific
-     * notation (e.g., `"1.234E5"`, `"-9.99E-200"`).
+     * notation (e.g., `"1.234E+5"`, `"-9.99E-200"`).
      *
      * Renders the coefficient digits, inserts a decimal point after the
      * leading digit (when there's more than one digit), then appends `E`,
-     * the exponent sign for negative exponents only, and the absolute
-     * exponent value. The `+` sign is omitted for non-negative exponents,
-     * matching the behavior of `Double.toString` in Kotlin and Java.
+     * the exponent sign, and the absolute exponent value. The sign is
+     * always written: `+` for non-negative exponents, `-` for negative,
+     * per the IEEE 754-2019 / GDAS `to-scientific-string` form.
      */
     private fun fnzToNormalizedScientificString(
         sign: Boolean, qExp: Int,
@@ -419,7 +424,8 @@ object Decimal128TextCodec {
         val decimalPointLen = if (digitLen > 1) 1 else 0
         val printedDigitLen = digitLen + 1 - (-digitLen ushr 31)
         val expELen = 1
-        val expSignLen = if (eExp < 0) 1 else 0
+        val expSignLen = 1
+        val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
         val expDigitLen = max(calcDigitLen128(0L, eExpAbs.toLong()), 1)
         val totalLen = signLen + decimalPointLen + printedDigitLen + expELen + expSignLen + expDigitLen
         val ascii = ByteArray(totalLen)
@@ -431,7 +437,7 @@ object Decimal128TextCodec {
         }
         val iE = signLen + decimalPointLen + printedDigitLen
         ascii[iE] = ascii_E
-        ascii[iE + 1] = ascii_minus
+        ascii[iE + 1] = expSignByte
         renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), ascii, totalLen)
         return ascii.decodeToString()
 
