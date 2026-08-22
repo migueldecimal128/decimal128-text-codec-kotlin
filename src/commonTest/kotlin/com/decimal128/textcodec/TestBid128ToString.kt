@@ -81,13 +81,13 @@ class TestBid128ToString {
         val dec: Decimal = tc.toDecimal()
         val longs = LongArray(2)
         dec.encodeBid128(longs)
-        val observed = Decimal128BidTextCodec.bid128ToString(longs[0], longs[1])
+        val observed = Decimal128TextCodec.bid128ToString(longs[0], longs[1])
         assertEquals(tc, observed)
 
         val tcNegated = "-$tc"
         val negated = tcNegated.toDecimal()
         negated.encodeBid128(longs)
-        val observedNegated = Decimal128BidTextCodec.bid128ToString(longs[0], longs[1])
+        val observedNegated = Decimal128TextCodec.bid128ToString(longs[0], longs[1])
         assertEquals(tcNegated, observedNegated)
     }
 }

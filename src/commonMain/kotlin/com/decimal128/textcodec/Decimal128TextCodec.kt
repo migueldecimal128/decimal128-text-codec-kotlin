@@ -82,7 +82,7 @@ import kotlin.math.min
  *
  * MIT License.
  */
-object Decimal128BidTextCodec {
+object Decimal128TextCodec {
 
     // compile-time flag to control verification of state
     private const val VERIFY_ENABLED: Boolean = true

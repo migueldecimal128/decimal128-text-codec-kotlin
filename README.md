@@ -8,14 +8,14 @@ Copied from `decimal128-kotlin-legacy/decimal128-bid-string-codec`. One file, on
 ## API
 
 ```kotlin
-import com.decimal128.textcodec.Decimal128BidTextCodec
+import com.decimal128.textcodec.Decimal128TextCodec
 
 // BID128 bits -> text
-val s: String = Decimal128BidTextCodec.bid128ToString(hi, lo)
+val s: String = Decimal128TextCodec.bid128ToString(hi, lo)
 
 // text -> BID128 bits; returns null on success, an error message on failure
 val bits = LongArray(2)
-val err: String? = Decimal128BidTextCodec.bid128Parse(bits, "1.23E+45")
+val err: String? = Decimal128TextCodec.bid128Parse(bits, "1.23E+45")
 ```
 
 BID128 values are a pair of `Long`s: index 0 is the high 64 bits of the

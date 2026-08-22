@@ -78,7 +78,7 @@ class TestBid128Parse {
 
 
         // ============================================================
-        // GENERATED EDGE-CASE / ROUNDING TESTS for Decimal128BidTextCodec
+        // GENERATED EDGE-CASE / ROUNDING TESTS for Decimal128TextCodec
         // Reference encoder applies IEEE 754-2019 roundTiesToEven, Intel-style
         // overflow clamping, and subnormal-flush. Existing passing cases were
         // reproduced to validate the reference before generating these.
@@ -388,7 +388,7 @@ class TestBid128Parse {
         if (verbose)
             println(tc)
         val longs = longArrayOf(0xFEED, 0xFACE)
-        val observed = Decimal128BidTextCodec.bid128Parse(longs, tc.str)
+        val observed = Decimal128TextCodec.bid128Parse(longs, tc.str)
         if (tc.expectedHex == "invalid") {
             assertNotNull(observed)
             assertEquals(0x7C00000000000000L, longs[0])
@@ -407,7 +407,7 @@ class TestBid128Parse {
     @Test
     fun testParseReturnErrorRejectsTooSmallDest() {
         assertFailsWith<IllegalArgumentException> {
-            Decimal128BidTextCodec.bid128Parse(LongArray(1), "0")
+            Decimal128TextCodec.bid128Parse(LongArray(1), "0")
         }
     }
 

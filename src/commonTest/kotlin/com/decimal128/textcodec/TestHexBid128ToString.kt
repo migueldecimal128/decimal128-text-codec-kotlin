@@ -105,7 +105,7 @@ class TestHexBid128ToString {
 
         val (bid128Hi, bid128Lo) = bid128ParseIntelHex(tc.hexStr)
         val observedDecimal = Decimal.decodeBid128(bid128Hi, bid128Lo).toString()
-        val observed = Decimal128BidTextCodec.bid128ToString(bid128Hi, bid128Lo)
+        val observed = Decimal128TextCodec.bid128ToString(bid128Hi, bid128Lo)
         if (observed != tc.expected) {
             if (decBid128Hi != bid128Hi || decBid128Lo != bid128Lo) {
                 val decHex = "[${hex16(decBid128Hi)},${hex16(decBid128Lo)}]"
