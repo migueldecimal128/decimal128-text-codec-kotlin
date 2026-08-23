@@ -1,31 +1,46 @@
 # decimal128-text-codec-kotlin
 
-Thin BID128 ↔ text codec for IEEE 754-2019 decimal128, for Kotlin Multiplatform.
+Thin codec between the two IEEE 754-2019 decimal128 interchange encodings — BID
+and DPD — and decimal character sequences, for Kotlin Multiplatform.
 
-Copied from `decimal128-kotlin-legacy/decimal128-bid-string-codec`. One file, one
-`object`, no runtime dependencies.
+Derived from `decimal128-kotlin-legacy/decimal128-bid-string-codec`, which was
+BID-only; the DPD back end was built alongside it. One file, one `object`, no
+runtime dependencies.
 
 ## API
 
 ```kotlin
 import com.decimal128.textcodec.Decimal128TextCodec
 
-// BID128 bits -> text
+// bits -> text
 val s: String = Decimal128TextCodec.bid128ToString(hi, lo)
+val d: String = Decimal128TextCodec.dpd128ToString(hi, lo)
 
-// text -> BID128 bits; returns null on success, an error message on failure
+// text -> bits; returns null on success, an error message on failure
 val bits = LongArray(2)
 val err: String? = Decimal128TextCodec.bid128Parse(bits, "1.23E+45")
+val errD: String? = Decimal128TextCodec.dpd128Parse(bits, "1.23E+45")
 ```
 
-BID128 values are a pair of `Long`s: index 0 is the high 64 bits of the
-encoding, index 1 the low 64.
+Values are a pair of `Long`s: index 0 is the high 64 bits of the encoding,
+index 1 the low 64. Both parse functions always write `out` — the canonical
+positive quiet NaN on failure — so a caller who ignores the return value still
+observes a legal IEEE 754-2019 datum.
 
 ## Scope
 
-BID only — the DPD interchange format is not supported. Rounding, where
-required, is `roundTiesToEven` and is not configurable. No arithmetic, no field
-extraction, no value-type wrapper.
+Rounding, where required, is `roundTiesToEven` and is not configurable. Output
+is the GDAS `to-scientific-string` form and is not configurable — the exponent
+sign is always written (`6.02E+23`), and cohort information is preserved. No
+arithmetic, no field extraction, no value-type wrapper.
+
+Accepted input matches what the full `decimal128-{lang}` ports accept, with one
+exception: **a NaN payload may be parenthesised**, `NaN(123)` as well as
+`NaN123`, matching the spelling C's `strtod` reads. The form is positional and
+balanced — `(` immediately after the word, at least one digit, `)` last — so
+`NaN()`, `NaN(1`, `NaN(1)2(3)`, `NaN[1]` and `NaN{1}` are all rejected.
+Rendering never emits parentheses. This is the one construct the codecs accept
+that the full ports reject.
 
 For the full decimal128 implementation see `decimal128-kotlin` at
 <https://decimal128.com>.

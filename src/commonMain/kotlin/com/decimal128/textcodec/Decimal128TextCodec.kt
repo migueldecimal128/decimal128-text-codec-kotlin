@@ -840,10 +840,28 @@ object Decimal128TextCodec {
 
     /**
      * Parse `NaN`, `qNaN`, or `sNaN` (case-insensitive) with an optional
-     * decimal payload, and write the corresponding BID128 encoding into
-     * [out]. Payloads may be wrapped in `()`, `[]`, or `{}`.
-     * Payloads of 34+ significant digits are non-canonical and produce a
+     * decimal payload, and write the corresponding encoding into [out].
+     * Payloads of 34+ digits AS WRITTEN are non-canonical and produce a
      * zero payload per IEEE 754-2019 §3.5.2.
+     *
+     * The payload may be written bare (`NaN123`) or enclosed in parentheses
+     * (`NaN(123)`). The parenthesised form is positional and balanced: the
+     * `(` must follow the word immediately, at least one digit must appear,
+     * and the `)` must be the last character of the input. So `NaN(1)2(3)`,
+     * `NaN(1`, `NaN(1]` and `NaN()` are all rejected, and `NaN[1]` / `NaN{1}`
+     * are not this form at all.
+     *
+     * This is the one place the codecs accept text the full decimal128 ports
+     * reject, and it is deliberate: C's own `strtod` reads
+     * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
+     * platform itself. The resemblance stops at the parentheses -- strtod's
+     * sequence is letters, digits and underscores read as an
+     * implementation-defined integer (`NAN(abc)` and `NAN(0x1c8)` are legal
+     * there), while a decimal128 payload is decimal digits. This is a
+     * paren-tolerant spelling of our own payload syntax, not C's.
+     *
+     * The legacy base skipped `(`, `)`, `[`, `]`, `{` and `}` ANYWHERE, so it
+     * read `NaN(1)2(3)` as payload 123. That is not this, and stays rejected.
      */
     private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
         var pos = startPos
@@ -860,29 +878,39 @@ object Decimal128TextCodec {
         var payloadDw0 = 0L
         var payloadDw1 = 0L
         ch = str.getOrNul(pos++)
-        if (ch.code != 0) {
+        val hasParen = ch == '('
+        if (hasParen)
+            ch = str.getOrNul(pos++)
+        if (hasParen || ch.code != 0) {
             var accumDigitCount = 0
             var accum19a = 0L
             var accum19b = 0L
-            do {
-                if (ch >= '0' && ch <= '9') {
-                    val d = ch - '0'
-                    // Count every digit written, leading zeros included. The
-                    // 33-digit limit below is a limit on the payload as spelled,
-                    // not on its significant digits, so "NaN" followed by forty
-                    // zeros and a one is over the limit and reads as zero.
-                    // Leading zeros contribute nothing to the accumulators, so
-                    // the value of a payload within the limit is unaffected.
-                    ++accumDigitCount
-                    if (accumDigitCount <= 19)
-                        accum19a = (accum19a * 10L) + d.toLong()
-                    else
-                        accum19b = (accum19b * 10L) + d.toLong()
-                } else {
-                    return "non-digit NaN payload character"
-                }
+            while (ch >= '0' && ch <= '9') {
+                val d = ch - '0'
+                // Count every digit written, leading zeros included. The
+                // 33-digit limit below is a limit on the payload as spelled,
+                // not on its significant digits, so "NaN" followed by forty
+                // zeros and a one is over the limit and reads as zero.
+                // Leading zeros contribute nothing to the accumulators, so
+                // the value of a payload within the limit is unaffected.
+                ++accumDigitCount
+                if (accumDigitCount <= 19)
+                    accum19a = (accum19a * 10L) + d.toLong()
+                else
+                    accum19b = (accum19b * 10L) + d.toLong()
                 ch = str.getOrNul(pos++)
-            } while (ch.code != 0)
+            }
+            if (accumDigitCount == 0)
+                return if (hasParen) "failure parsing NaN" else "non-digit NaN payload character"
+            if (hasParen) {
+                // the ')' must be present and must end the input
+                if (ch != ')')
+                    return if (ch.code == 0) "failure parsing NaN" else "non-digit NaN payload character"
+                if (str.getOrNul(pos++).code != 0)
+                    return "failure parsing NaN"
+            } else if (ch.code != 0) {
+                return "non-digit NaN payload character"
+            }
             if (accumDigitCount > 33) {
                 // IEEE754-2019 3.5.2 Encodings
                 //  ... as the payload of a NaN). If the value exceeds the maximum,

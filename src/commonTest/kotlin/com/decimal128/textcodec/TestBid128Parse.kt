@@ -326,17 +326,43 @@ class TestBid128Parse {
         TC("[7C00000000000000,0000000000003039]", "NaN12345"),
         TC("[7E00000000000000,0000000000000001]", "sNaN1"),
         TC("[7C00000000000000,0000000000000001]", "qNaN1"),
-        // The base accepted brackets around a NaN payload, and skipped them
-        // anywhere, so "NaN(1)2(3)" parsed as payload 123. The full ports
-        // reject all of these; the shared error corpus classes NaN(1) and
-        // NaN(123) as FAILURE_PARSING_NAN. Rejected here to match.
-        TC("invalid", "NaN(123)"),
+        // A payload may be parenthesised: positional and balanced, '(' straight
+        // after the word, at least one digit, ')' last. The legacy base instead
+        // skipped '(', ')', '[', ']', '{' and '}' ANYWHERE, so it read
+        // "NaN(1)2(3)" as payload 123 -- that stays rejected, as do the square
+        // and curly forms, which are not this syntax at all.
+        TC("[7C00000000000000,000000000000007B]", "NaN(123)"),
+        TC("[7C00000000000000,0000000000000001]", "NaN(1)"),
+        TC("[7E00000000000000,0000000000000005]", "sNaN(5)"),
+        TC("[FC00000000000000,0000000000000007]", "-NaN(7)"),
+        TC("[7C00000000000000,0000000000000001]", "qNaN(1)"),
+        TC("[7C00000000000000,0000000000000000]", "nan(0)"),
+        TC("[7C00000000000000,0000000000000001]", "NaN(0001)"),
+        TC("[7C00314DC6448D93,38C15B09FFFFFFFF]", "NaN(999999999999999999999999999999999)"),
+        // over the 33-digit written limit, so the payload reads as zero
+        TC("[7C00000000000000,0000000000000000]", "NaN(9999999999999999999999999999999999)"),
+        TC("invalid", "NaN()"),
+        TC("invalid", "sNaN()"),
+        TC("invalid", "NaN("),
+        TC("invalid", "NaN(1"),
+        TC("invalid", "NaN(1]"),
+        TC("invalid", "NaN(1)2(3)"),
+        TC("invalid", "NaN(1)x"),
+        TC("invalid", "NaN)1("),
         TC("invalid", "NaN[123]"),
         TC("invalid", "NaN{123}"),
-        TC("invalid", "NaN(1)2(3)"),
-        TC("invalid", "NaN(1)"),
-        TC("invalid", "sNaN(5)"),
-        TC("invalid", "NaN)1("),
+        // mismatched openers: only '(' opens, only ')' closes, and a mutation
+        // that let '[' or '{' open is invisible without these
+        TC("invalid", "NaN[123)"),
+        TC("invalid", "NaN{123)"),
+        TC("invalid", "NaN(123]"),
+        TC("invalid", "NaN(123}"),
+        TC("invalid", "NaN (1)"),
+        // strtod would take all three of these; a decimal128 payload is digits
+        TC("invalid", "NaN(abc)"),
+        TC("invalid", "NaN(0x1c8)"),
+        TC("invalid", "NaN(1_2)"),
+        TC("invalid", "NaN(-1)"),
         TC("invalid", "NaN 1"),
         TC("[7C00314DC6448D93,38C15B09FFFFFFFF]", "NaN999999999999999999999999999999999"),
         TC("[7C0004EE2D6D415B,85ACEF8100000000]", "NaN100000000000000000000000000000000"),
@@ -454,6 +480,7 @@ class TestBid128Parse {
     fun nanPayloadRulesAreSharedByBothFormats() {
         for (str in arrayOf(
             "NaN(1)", "NaN[1]", "sNaN(5)", "NaN)1(",
+            "NaN(123)", "NaN()", "NaN(1", "NaN(1)2(3)",
             "NaN1", "NaN0001",
             "NaN" + "0".repeat(32) + "1",
             "NaN" + "9".repeat(33),
@@ -472,6 +499,43 @@ class TestBid128Parse {
                 assertEquals(b[1], d[1], "<" + str + ">")
             }
         }
+    }
+
+    /**
+     * The parenthesised spelling is exactly the bare spelling: same bits, in
+     * both encodings. Asserting the equivalence rather than a second table of
+     * hex means the two forms cannot drift apart.
+     */
+    @Test
+    fun parenthesisedPayloadEqualsBarePayload() {
+        for (payload in arrayOf(
+            "0", "1", "5", "9", "10", "0001", "12345", "999999999999999999",
+            "1000000000000000000", "999999999999999999999999999999999",
+            "9999999999999999999999999999999999", "0".repeat(40) + "1",
+        )) {
+            for (prefix in arrayOf("NaN", "sNaN", "qNaN", "-NaN", "-sNaN")) {
+                val bare = LongArray(2)
+                val paren = LongArray(2)
+                assertNull(Decimal128TextCodec.bid128Parse(bare, prefix + payload))
+                assertNull(Decimal128TextCodec.bid128Parse(paren, "$prefix($payload)"))
+                assertEquals(bare[0], paren[0], "bid hi for $prefix($payload)")
+                assertEquals(bare[1], paren[1], "bid lo for $prefix($payload)")
+                assertNull(Decimal128TextCodec.dpd128Parse(bare, prefix + payload))
+                assertNull(Decimal128TextCodec.dpd128Parse(paren, "$prefix($payload)"))
+                assertEquals(bare[0], paren[0], "dpd hi for $prefix($payload)")
+                assertEquals(bare[1], paren[1], "dpd lo for $prefix($payload)")
+            }
+        }
+    }
+
+    /** Rendering never emits parentheses, whichever spelling was parsed. */
+    @Test
+    fun renderingIsAlwaysTheBareForm() {
+        val out = LongArray(2)
+        assertNull(Decimal128TextCodec.bid128Parse(out, "NaN(123)"))
+        assertEquals("NaN123", Decimal128TextCodec.bid128ToString(out[0], out[1]))
+        assertNull(Decimal128TextCodec.dpd128Parse(out, "-sNaN(45)"))
+        assertEquals("-sNaN45", Decimal128TextCodec.dpd128ToString(out[0], out[1]))
     }
 
     private fun hex16(v: Long): String =
