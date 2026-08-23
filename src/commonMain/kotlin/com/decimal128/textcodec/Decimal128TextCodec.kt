@@ -473,7 +473,7 @@ object Decimal128TextCodec {
         val digitLen = calcDigitLen128(dw1, dw0)
         val eExp = qExp + (digitLen - 1)
         return when {
-            qExp == 0 -> fnzToIntegerString(sign, dw1, dw0)
+            qExp == 0 -> fnzToIntegerString(sign, digitLen, dw1, dw0)
             qExp <= 0 && eExp >= -6 -> fnzToDecimalPointString(sign, qExp, digitLen, dw1, dw0)
             else -> fnzToNormalizedScientificString(sign, qExp, digitLen, dw1, dw0)
         }
@@ -487,16 +487,15 @@ object Decimal128TextCodec {
      * `Long.toString`. General path: renders via [u128ToAscii] into a byte
      * buffer sized exactly to the result.
      */
-    private fun fnzToIntegerString(sign: Boolean, dw1: Long, dw0: Long): String {
+    private fun fnzToIntegerString(sign: Boolean, digitLen: Int, dw1: Long, dw0: Long): String {
+        verify { digitLen > 0 }
         if (dw1 == 0L && dw0 >= 0L) {
             return (if (sign) -dw0 else dw0).toString()
         }
-        val digitLen = calcDigitLen128(dw1, dw0)
-        val printDigitLen = digitLen + 1 - (-digitLen ushr 31)
         val signBit = if (sign) 1 else 0
-        val ascii = ByteArray(signBit + printDigitLen)
+        val ascii = ByteArray(signBit + digitLen)
         ascii[0] = ascii_minus
-        u128ToAscii(printDigitLen, dw1, dw0, ascii, signBit)
+        u128ToAscii(digitLen, dw1, dw0, ascii, signBit)
         return ascii.decodeToString()
     }
 
@@ -548,25 +547,28 @@ object Decimal128TextCodec {
         val eExpAbs = (eExp xor (eExp shr 31)) - (eExp shr 31)
         val signLen = if (sign) 1 else 0
         val decimalPointLen = if (digitLen > 1) 1 else 0
-        val printedDigitLen = digitLen + 1 - (-digitLen ushr 31)
         val expELen = 1
         val expSignLen = 1
         val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
-        val expDigitLen = max(calcDigitLen128(0L, eExpAbs.toLong()), 1)
-        val totalLen = signLen + decimalPointLen + printedDigitLen + expELen + expSignLen + expDigitLen
+        val expDigitLen = when {
+            eExpAbs >= 1000 -> 4
+            eExpAbs >= 100 -> 3
+            eExpAbs >= 10 -> 2
+            else -> 1
+        }
+        val totalLen = signLen + decimalPointLen + digitLen + expELen + expSignLen + expDigitLen
         val ascii = ByteArray(totalLen)
         ascii[0] = ascii_minus
-        u128ToAscii(printedDigitLen, dw1, dw0, ascii, signLen + decimalPointLen)
+        u128ToAscii(digitLen, dw1, dw0, ascii, signLen + decimalPointLen)
         if (decimalPointLen > 0) {
             ascii[signLen] = ascii[signLen + 1]
             ascii[signLen + 1] = ascii_dot
         }
-        val iE = signLen + decimalPointLen + printedDigitLen
+        val iE = signLen + decimalPointLen + digitLen
         ascii[iE] = ascii_E
         ascii[iE + 1] = expSignByte
         renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), ascii, totalLen)
         return ascii.decodeToString()
-
     }
 
     // ------- render an integer -------------------------------------------
@@ -787,40 +789,25 @@ object Decimal128TextCodec {
      * @return `null` on success (with `out` populated), or a
      *         human-readable error string on failure
      */
+    private inline fun String.getOrNul(index: Int): Char = if (index < length) this[index] else '\u0000'
+
     private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
-        val txt = StringIterator(str)
-        val chFirst = txt.nextChar()
+        var pos = 0
+        val chFirst = str.getOrNul(pos++)
         var ch = chFirst
         val sign = ch == '-'
         if (ch == '+' || ch == '-')
-            ch = txt.nextChar()
+            ch = str.getOrNul(pos++)
         if (ch >= '0' && ch <= '9' || ch == '.')
-            return parseFiniteValueText(out, formatIsBid, sign, ch, txt)
+            return parseFiniteValueText(out, formatIsBid, sign, ch, str, pos)
         val chLower = (ch.code or 0x20).toChar()
         if (chLower == 'i')
-            return parseInfinityText(out, sign, ch, txt)
+            return parseInfinityText(out, sign, ch, str, pos)
         if (chLower == 'n' || chLower == 's' || chLower == 'q')
-            return parseNanText(out, formatIsBid, sign, ch, txt)
+            return parseNanText(out, formatIsBid, sign, ch, str, pos)
         if (chFirst == '\u0000')
             return "empty string"
         return "invalid format"
-    }
-
-    /**
-     * Forward-only character iterator over a `String`.
-     *
-     * Returns `'\u0000'` (null character) at end-of-string, used as a
-     * sentinel by callers to detect the end without the need for
-     * multiple scattered length checks.
-     * The choice of `'\u0000'` is safe for parsing decimal numerals because
-     * NUL is not a valid character in any of the accepted input formats.
-     */
-    private class StringIterator(var str: String) {
-        private var i = 0
-
-        /** Returns the next character and advances the iterator, or '\u0000' if at end. */
-        fun nextChar(): Char = if (i < str.length) str[i++] else '\u0000'
-
     }
 
     /**
@@ -828,22 +815,25 @@ object Decimal128TextCodec {
      * case-insensitively, and write the corresponding BID128 encoding into
      * [out]. Returns an error string for any other input.
      */
-    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
+    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
+        var pos = startPos
         var ch = chFirst
         var chPrevCode = 0
-        for (target in "infinity") {
-            if (ch.code or 0x20 != target.code) {
+        val target = "infinity"
+        for (i in 0 until 8) {
+            val targetCode = target[i].code
+            if (ch.code or 0x20 != targetCode) {
                 if (ch.code == 0)
                     break
                 else
                     return "failure parsing infinity"
             }
             chPrevCode = ch.code or 0x20
-            ch = txt.nextChar()
+            ch = str.getOrNul(pos++)
         }
         if (ch.code != 0 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
             return "failure parsing Infinity"
-        out[0] = 0x7800000000000000 or if (sign) Long.MIN_VALUE else 0
+        out[0] = 0x7800000000000000L or if (sign) Long.MIN_VALUE else 0L
         out[1] = 0L
         return null
     }
@@ -855,20 +845,21 @@ object Decimal128TextCodec {
      * Payloads of 34+ significant digits are non-canonical and produce a
      * zero payload per IEEE 754-2019 §3.5.2.
      */
-    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
+    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
+        var pos = startPos
         var ch = chFirst
         val hasS = (ch.code or 0x20) == 's'.code
         val hasQ = (ch.code or 0x20) == 'q'.code
         if (hasQ or hasS)
-            ch = txt.nextChar()
+            ch = str.getOrNul(pos++)
         if (((ch.code or 0x20) != 'n'.code) ||
-            ((txt.nextChar().code or 0x20) != 'a'.code) ||
-            ((txt.nextChar().code or 0x20) != 'n'.code)
+            ((str.getOrNul(pos++).code or 0x20) != 'a'.code) ||
+            ((str.getOrNul(pos++).code or 0x20) != 'n'.code)
         )
             return "failure parsing NaN"
         var payloadDw0 = 0L
         var payloadDw1 = 0L
-        ch = txt.nextChar()
+        ch = str.getOrNul(pos++)
         if (ch.code != 0) {
             var accumDigitCount = 0
             var accum19a = 0L
@@ -890,7 +881,7 @@ object Decimal128TextCodec {
                 } else {
                     return "non-digit NaN payload character"
                 }
-                ch = txt.nextChar()
+                ch = str.getOrNul(pos++)
             } while (ch.code != 0)
             if (accumDigitCount > 33) {
                 // IEEE754-2019 3.5.2 Encodings
@@ -903,9 +894,9 @@ object Decimal128TextCodec {
                 payloadDw1 = 0L
                 if (accumDigitCount > 19) {
                     val pow10 = accumDigitCount - 19
-                    val (hi, lo) = u128FmaPow10(accum19a, pow10, accum19b)
-                    payloadDw1 = hi
-                    payloadDw0 = lo
+                    u128FmaPow10(out, accum19a, pow10, accum19b)
+                    payloadDw1 = out[0]
+                    payloadDw0 = out[1]
                 }
             }
         }
@@ -985,8 +976,10 @@ object Decimal128TextCodec {
         formatIsBid: Boolean,
         sign: Boolean,
         chFirst: Char,
-        txt: StringIterator
+        str: String,
+        startPos: Int
     ): String? {
+        var pos = startPos
         var residue = EXACT
 
         var hasCoefficientDigit = false // have we seen any digits at all, including zero
@@ -1044,7 +1037,7 @@ object Decimal128TextCodec {
                     }
                 }
             }
-            ch = txt.nextChar()
+            ch = str.getOrNul(pos++)
         }
         if (afterUnderscore)
             return "invalid underscore location"
@@ -1052,10 +1045,10 @@ object Decimal128TextCodec {
             return "no coefficient digit"
         // this path has at least one digit
         if (ch == 'E' || ch == 'e') {
-            ch = txt.nextChar()
+            ch = str.getOrNul(pos++)
             if (ch == '+' || ch == '-') {
                 expSign = ch == '-'
-                ch = txt.nextChar()
+                ch = str.getOrNul(pos++)
             }
             var hasExpDigit = false
             var expSignificantDigitCount = 0
@@ -1082,7 +1075,7 @@ object Decimal128TextCodec {
                         afterUnderscore = false
                     }
                 }
-                ch = txt.nextChar()
+                ch = str.getOrNul(pos++)
             }
             if (afterUnderscore)
                 return "invalid underscore location"
@@ -1099,9 +1092,9 @@ object Decimal128TextCodec {
         var dw1 = 0L
         if (significantDigitCount > 19) {
             val pow10 = min(34, significantDigitCount) - 19
-            val (hi, lo) = u128FmaPow10(accum19a, pow10, accum19b)
-            dw1 = hi
-            dw0 = lo
+            u128FmaPow10(out, accum19a, pow10, accum19b)
+            dw1 = out[0]
+            dw0 = out[1]
         }
         // at this point, our coeff <= precision digits
         // but we need to deal with residue and rounding
@@ -1336,7 +1329,15 @@ object Decimal128TextCodec {
     private fun finalizeClamping(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         val qExcess = qExp - 6111
         verify { qExcess > 0 && qExcess <= 34 - calcDigitLen128(dw1, dw0) }
-        val (dw1Scaled, dw0Scaled) = umul128xPow10to128(dw1, dw0, qExcess)
+        val pow10Offset = qExcess shl 1
+        val y1 = POW10[pow10Offset + 1]
+        val y0 = POW10[pow10Offset]
+        val pp00Hi = unsignedMulHi(dw0, y0)
+        val pp00Lo = dw0 * y0
+        val pp10Lo = dw1 * y0
+        val pp01Lo = dw0 * y1
+        val dw0Scaled = pp00Lo
+        val dw1Scaled = pp00Hi + pp10Lo + pp01Lo
         verify { coeffQExpFit(dw1Scaled, dw0Scaled, 6111) }
         setFinite(out, formatIsBid, sign, 6111, dw1Scaled, dw0Scaled)
     }
@@ -1759,11 +1760,9 @@ object Decimal128TextCodec {
      * a conditional branch on the path through the function.
      */
     private inline fun calcBitLen128(dw1: Long, dw0: Long): Int {
-        val dw1IsZeroMask = ((dw1 or -dw1) shr 63).inv().toInt()
-        val nlz1 = dw1.countLeadingZeroBits()
-        val nlz0 = dw0.countLeadingZeroBits()
-        val bitLen = 128 - nlz1 - (nlz0 and dw1IsZeroMask)
-        return bitLen
+        return if (dw1 != 0L) 128 - dw1.countLeadingZeroBits()
+        else if (dw0 != 0L) 64 - dw0.countLeadingZeroBits()
+        else 0
     }
 
     /**
@@ -1775,7 +1774,7 @@ object Decimal128TextCodec {
      * unsigned 128-bit compare against the next-larger power of 10 in
      * [POW10] resolves the off-by-one.
      */
-    private fun calcDigitLen128(dw1: Long, dw0: Long): Int {
+    private inline fun calcDigitLen128(dw1: Long, dw0: Long): Int {
         val bitLen = calcBitLen128(dw1, dw0)
         val loDigitCount = (bitLen * 1233) ushr 12
         val hiDigitCount = loDigitCount + 1
@@ -1795,13 +1794,13 @@ object Decimal128TextCodec {
      * Unsigned compare of two `Long` values, by flipping the sign bit
      * before doing a signed compare.
      */
-    private fun unsignedCmp(x: Long, y: Long): Int =
+    private inline fun unsignedCmp(x: Long, y: Long): Int =
         (x xor Long.MIN_VALUE).compareTo(y xor Long.MIN_VALUE)
 
     /**
      * Unsigned less-than test for two `Long` values.
      */
-    private fun unsignedLT(x: Long, y: Long): Boolean =
+    private inline fun unsignedLT(x: Long, y: Long): Boolean =
         (x xor Long.MIN_VALUE) < (y xor Long.MIN_VALUE)
 
     /**
@@ -1811,7 +1810,7 @@ object Decimal128TextCodec {
      * partial products, and assembles the high 64 bits with proper carry
      * propagation through the middle.
      */
-    private fun unsignedMulHi(x: Long, y: Long): Long {
+    private inline fun unsignedMulHi(x: Long, y: Long): Long {
         val xLo = x and 0xFFFFFFFFL
         val xHi = x ushr 32
         val yLo = y and 0xFFFFFFFFL
@@ -1832,48 +1831,17 @@ object Decimal128TextCodec {
     }
 
     /**
-     * Multiply a 128-bit unsigned value by `10^pow10`, returning the low
-     * 128 bits. Caller must ensure the product fits.
+     * Multiply a 128-bit unsigned value by `10^pow10` and add a 64-bit integer `a`,
+     * writing the 128-bit result into `out[0]` (high) and `out[1]` (low).
      */
-    private inline fun umul128xPow10to128(dw1: Long, dw0: Long, pow10: Int): Pair<Long, Long> {
-        val pow10Offset = pow10 shl 1
-        val pow10Dw1 = POW10[pow10Offset + 1]
-        val pow10Dw0 = POW10[pow10Offset]
-        return umul128x128to128(dw1, dw0, pow10Dw1, pow10Dw0)
-    }
-
-    /**
-     * Multiply two 128-bit unsigned values, returning the low 128 bits of
-     * the 256-bit product. The `x1*y1` partial product is omitted (it
-     * contributes only to bits 128 and above). Caller must ensure the
-     * product fits.
-     */
-    private inline fun umul128x128to128(x1: Long, x0: Long, y1: Long, y0: Long): Pair<Long, Long> {
-        val pp00Hi = unsignedMulHi(x0, y0)
-        val pp00Lo = x0 * y0
-        val pp10Lo = x1 * y0
-        val pp01Lo = x0 * y1
-
-        val p0 = pp00Lo
-        val p1 = pp00Hi + pp10Lo + pp01Lo
-
-        return p1 to p0
-    }
-
-    /**
-     * Multiply a 128-bit unsigned value by `10^pow10`, returning the low
-     * 128 bits.
-     *
-     * In the context of parsing with controlled digit counts this
-     * will not overflow.
-     */
-    private fun u128FmaPow10(x: Long, pow10: Int, a: Long): Pair<Long, Long> {
+    private inline fun u128FmaPow10(out: LongArray, x: Long, pow10: Int, a: Long) {
         val y = POW10[pow10 shl 1]
         val prodLo = x * y
         val prodHi = unsignedMulHi(x, y)
         val sumLo = prodLo + a
         val sumHi = prodHi + if (unsignedLT(sumLo, prodLo)) 1L else 0L
-        return sumHi to sumLo
+        out[0] = sumHi
+        out[1] = sumLo
     }
 
     /**
