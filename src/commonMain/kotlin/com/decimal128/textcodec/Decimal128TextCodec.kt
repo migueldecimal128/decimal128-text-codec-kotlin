@@ -1130,13 +1130,12 @@ object Decimal128TextCodec {
      * -Step 3 (special values): Not applicable here — special values
      * are handled by callers before reaching this function.
      *
-     * Step 4 (underflow): if the exponent is below Emin and the required
-     * range truncation exceeds the precision truncation, divert to
+     * Step 4 (underflow): if the exponent is below Emin, divert to
      * [finalizeUnderflowRegion] for subnormal handling.
      *
-     * Step 5 (precision truncation): if the coefficient exceeds 34 digits,
-     * scale down by the necessary power of 10, accumulating the
-     * truncation residue with the input residue.
+     * Step 5 (precision truncation): REMOVED as unreachable from a codec's
+     * callers -- see the note in the body, which also states what would have
+     * to change for it to be needed again.
      *
      * Step 6 (rounding): apply `roundTiesToEven`. If rounding causes the
      * coefficient to roll over to 10^34, normalize to 10^33 and increment
@@ -1172,29 +1171,48 @@ object Decimal128TextCodec {
 
         // Step 3: special values ... not applicable ... only Finite
 
-        // Step 4: underflow
-        // divert iff range truncation exceeds precision truncation
-        val rangeTruncationNeeded = -6176 - qExpIn
-        val digitLenIn = calcDigitLen128(dw1In, dw0In)
-        val precisionTruncationNeeded = max(digitLenIn - 34, 0)
-        if (rangeTruncationNeeded > precisionTruncationNeeded) {
+        // Step 5 -- precision truncation -- IS NOT HERE, and this is the reason.
+        //
+        // This finalize chain descends from one built for an arithmetic engine,
+        // whose callers hand it coefficients wider than the 34-digit precision
+        // limit: multiply and FMA produce a double-width product, and the engine
+        // truncates it here, accumulating the discarded digits into the residue
+        // before rounding. A codec has no such caller.
+        //
+        // [parseFiniteValueText] accumulates at most 19 + 15 = 34 significant
+        // digits and turns every digit past them into a residue instead, so the
+        // coefficient it hands over is never wider than the limit. The only
+        // other entry to this function is the swamped branch of
+        // [finalizeUnderflowRegion], which passes a zero coefficient. So the
+        // truncation step is unreachable, and rather than carry a path that has
+        // never once executed -- and therefore has never been verified to work
+        // -- it is removed and the invariant is enforced.
+        //
+        // Measured on the C port, which is a translation of this file: zero
+        // executions across the 86,126-row shared corpus, 400,000 random
+        // numerals, and 76,280 finalize calls driven by inputs of up to 5,000
+        // digits, where the widest coefficient ever seen here was 34.
+        //
+        // This is `check`, not `verify`: it is unconditional, because a build
+        // with VERIFY_ENABLED off would otherwise fall through and encode an
+        // out-of-range coefficient silently. It cannot fire on a caller's data
+        // -- no input reaches it -- only on a future caller that breaks the
+        // invariant, which is exactly when a loud failure is wanted. A caller
+        // that is not a parser needs the truncation step back; it is live in
+        // every full port's Finalize, where multiply and FMA do reach it.
+        check(calcDigitLen128(dw1In, dw0In) <= 34)
+
+        // Step 4: underflow. With no precision truncation to outrank it, the
+        // test is simply whether the exponent is below the minimum.
+        if (qExpIn < -6176) {
             finalizeUnderflowRegion(out, formatIsBid, sign, qExpIn, dw1In, dw0In, residueIn)
             return
         }
 
-        // Step 5: normalize to <= precision, accumulating residue
         var totalResidue = residueIn
         var dw1 = dw1In
         var dw0 = dw0In
         var qExp = qExpIn
-        if (precisionTruncationNeeded > 0) {
-            val truncationResidue: Int = u128ScaleDownPow10(out, dw1, dw0, precisionTruncationNeeded)
-            dw1 = out[0]
-            dw0 = out[1]
-            totalResidue = residueMerge(truncationResidue, totalResidue)
-            qExp += precisionTruncationNeeded
-            verify { calcDigitLen128(dw1, dw0) == 34 }
-        }
 
         // step 6: rounding ... in this world only roundTiesToEven
         val applyRounding = totalResidue == GT_HALF || totalResidue == HALF && (dw0 and 1L) != 0L
