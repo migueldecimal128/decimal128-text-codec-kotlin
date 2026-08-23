@@ -121,13 +121,13 @@ object Decimal128TextCodec {
 
     /**
      * Parse a decimal string into a BID128 value, writing the result into
-     * [bid128Longs].
+     * [out].
      *
-     * On success, `bid128Longs[0]` is set to the high 64 bits (`dw1`) of the
-     * encoding, `bid128Longs[1]` is set to the low 64 bits (`dw0`), and this
+     * On success, `out[0]` is set to the high 64 bits (`dw1`) of the
+     * encoding, `out[1]` is set to the low 64 bits (`dw0`), and this
      * method returns `null`.
      *
-     * On failure, `bid128Longs[0]` and `bid128Longs[1]` are set to the
+     * On failure, `out[0]` and `out[1]` are set to the
      * canonical positive quiet-NaN bit pattern (`0x7C00000000000000` and
      * `0x0000000000000000`), and this method returns a human-readable error
      * message describing the failure. Writing NaN on failure ensures that
@@ -164,18 +164,18 @@ object Decimal128TextCodec {
      * around the decimal point, malformed exponent fields, and similar
      * syntax errors.
      *
-     * @param bid128Longs a `LongArray` of size at least 2, into which the
+     * @param out a `LongArray` of size at least 2, into which the
      *                    parsed BID128 value (or NaN, on failure) is written
      * @param str         the decimal string to parse
      * @return `null` on success, or a human-readable error message on failure
-     * @throws IllegalArgumentException if `bid128Longs.size < 2`
+     * @throws IllegalArgumentException if `out.size < 2`
      */
-    fun bid128Parse(bid128Longs: LongArray, str: String): String? {
-        require(bid128Longs.size >= 2) { "bid128Longs must have size >= 2, was ${bid128Longs.size}" }
-        val errorStr = encodeStringToBid128OrError(bid128Longs, str)
+    fun bid128Parse(out: LongArray, str: String): String? {
+        require(out.size >= 2) { "out must have size >= 2, was ${out.size}" }
+        val errorStr = encodeStringOrError(out, formatIsBid = true, str = str)
         if (errorStr != null) {
-            bid128Longs[0] = 0x7C00000000000000L
-            bid128Longs[1] = 0x0000000000000000L
+            out[0] = 0x7C00000000000000L
+            out[1] = 0x0000000000000000L
         }
         return errorStr
     }
@@ -662,10 +662,10 @@ object Decimal128TextCodec {
      * parser so it doesn't have to re-read what the dispatcher already
      * consumed.
      *
-     * @return `null` on success (with `bid128Longs` populated), or a
+     * @return `null` on success (with `out` populated), or a
      *         human-readable error string on failure
      */
-    private fun encodeStringToBid128OrError(bid128Longs: LongArray, str: String): String? {
+    private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
         val txt = StringIterator(str)
         val chFirst = txt.nextChar()
         var ch = chFirst
@@ -673,12 +673,12 @@ object Decimal128TextCodec {
         if (ch == '+' || ch == '-')
             ch = txt.nextChar()
         if (ch >= '0' && ch <= '9' || ch == '.')
-            return parseFiniteValueText(bid128Longs, sign, ch, txt)
+            return parseFiniteValueText(out, formatIsBid, sign, ch, txt)
         val chLower = (ch.code or 0x20).toChar()
         if (chLower == 'i')
-            return parseInfinityText(bid128Longs, sign, ch, txt)
+            return parseInfinityText(out, sign, ch, txt)
         if (chLower == 'n' || chLower == 's' || chLower == 'q')
-            return parseNanText(bid128Longs, sign, ch, txt)
+            return parseNanText(out, sign, ch, txt)
         if (chFirst == '\u0000')
             return "empty string"
         return "invalid format"
@@ -704,9 +704,9 @@ object Decimal128TextCodec {
     /**
      * Parse the keyword `Infinity` (or its 3-letter abbreviation `Inf`),
      * case-insensitively, and write the corresponding BID128 encoding into
-     * [bid128Longs]. Returns an error string for any other input.
+     * [out]. Returns an error string for any other input.
      */
-    private fun parseInfinityText(bid128Longs: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
+    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
         var ch = chFirst
         var chPrevCode = 0
         for (target in "infinity") {
@@ -721,19 +721,19 @@ object Decimal128TextCodec {
         }
         if (ch.code != 0 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
             return "failure parsing Infinity"
-        bid128Longs[0] = 0x7800000000000000 or if (sign) Long.MIN_VALUE else 0
-        bid128Longs[1] = 0L
+        out[0] = 0x7800000000000000 or if (sign) Long.MIN_VALUE else 0
+        out[1] = 0L
         return null
     }
 
     /**
      * Parse `NaN`, `qNaN`, or `sNaN` (case-insensitive) with an optional
      * decimal payload, and write the corresponding BID128 encoding into
-     * [bid128Longs]. Payloads may be wrapped in `()`, `[]`, or `{}`.
+     * [out]. Payloads may be wrapped in `()`, `[]`, or `{}`.
      * Payloads of 34+ significant digits are non-canonical and produce a
      * zero payload per IEEE 754-2019 §3.5.2.
      */
-    private fun parseNanText(bid128Longs: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
+    private fun parseNanText(out: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
         var ch = chFirst
         val hasS = (ch.code or 0x20) == 's'.code
         val hasQ = (ch.code or 0x20) == 'q'.code
@@ -788,14 +788,14 @@ object Decimal128TextCodec {
         }
         val withoutPayload =
             (if (hasS) 0x7E00000000000000 else 0x7C00000000000000) or (if (sign) Long.MIN_VALUE else 0L)
-        bid128Longs[0] = withoutPayload or payloadDw1
-        bid128Longs[1] = payloadDw0
+        out[0] = withoutPayload or payloadDw1
+        out[1] = payloadDw0
         return null
     }
 
     /**
      * Parse a finite decimal numeral and write the corresponding BID128
-     * encoding into [bid128Longs]. Accepts an optional decimal point, an
+     * encoding into [out]. Accepts an optional decimal point, an
      * optional `E`/`e` exponent (with optional `+`/`-` sign), and any
      * number of significant digits.
      *
@@ -812,7 +812,8 @@ object Decimal128TextCodec {
      * a human-readable error string on syntax errors.
      */
     private fun parseFiniteValueText(
-        bid128Longs: LongArray,
+        out: LongArray,
+        formatIsBid: Boolean,
         sign: Boolean,
         chFirst: Char,
         txt: StringIterator
@@ -942,13 +943,13 @@ object Decimal128TextCodec {
         // the qExp ...
         val signedExp = if (expSign) -exp else exp
         val qExp = signedExp - fractionalDigitCount + max(0, significantDigitCount - 34)
-        bid128RoundAndFinalizeFinite(bid128Longs, sign, qExp, dw1, dw0, residue)
+        roundAndFinalizeFinite(out, formatIsBid, sign, qExp, dw1, dw0, residue)
         return null
     }
 
     /**
      * Round and finalize a finite parsed coefficient/exponent
-     * pair into the BID128 encoding stored in [bid128Longs].
+     * pair into the BID128 encoding stored in [out].
      *
      * Implements `roundTiesToEven` rounding with full handling of the
      * decimal128 boundary conditions: oversized coefficient, underflow to
@@ -969,7 +970,7 @@ object Decimal128TextCodec {
      *
      * Step 4 (underflow): if the exponent is below Emin and the required
      * range truncation exceeds the precision truncation, divert to
-     * [bid128FinalizeUnderflowRegion] for subnormal handling.
+     * [finalizeUnderflowRegion] for subnormal handling.
      *
      * Step 5 (precision truncation): if the coefficient exceeds 34 digits,
      * scale down by the necessary power of 10, accumulating the
@@ -983,8 +984,9 @@ object Decimal128TextCodec {
      * absorb the excess into the coefficient (clamping near Emax) or
      * overflow to infinity.
      */
-    private fun bid128RoundAndFinalizeFinite(
-        bid128Longs: LongArray,
+    private fun roundAndFinalizeFinite(
+        out: LongArray,
+        formatIsBid: Boolean,
         sign: Boolean,
         qExpIn: Int,
         dw1In: Long,
@@ -995,13 +997,13 @@ object Decimal128TextCodec {
         //         ... and no roundTiesToEven rounding
         if (residueIn <= LT_HALF || residueIn == HALF && (dw0In and 1L) == 0L) {
             if (coeffQExpFit(dw1In, dw0In, qExpIn)) {
-                bid128Set(bid128Longs, sign, qExpIn, dw1In, dw0In)
+                setFinite(out, formatIsBid, sign, qExpIn, dw1In, dw0In)
                 return
             }
             // Step 2: zero coefficient with out-of-range qExp ... clamp qExp
             if ((dw1In or dw0In) == 0L) {
                 val qClamped = max(min(qExpIn, 6111), -6176)
-                bid128Set(bid128Longs, sign, qClamped, 0L, 0L)
+                setFinite(out, formatIsBid, sign, qClamped, 0L, 0L)
                 return
             }
         }
@@ -1014,7 +1016,7 @@ object Decimal128TextCodec {
         val digitLenIn = calcDigitLen128(dw1In, dw0In)
         val precisionTruncationNeeded = max(digitLenIn - 34, 0)
         if (rangeTruncationNeeded > precisionTruncationNeeded) {
-            bid128FinalizeUnderflowRegion(bid128Longs, sign, qExpIn, dw1In, dw0In, residueIn)
+            finalizeUnderflowRegion(out, formatIsBid, sign, qExpIn, dw1In, dw0In, residueIn)
             return
         }
 
@@ -1024,9 +1026,9 @@ object Decimal128TextCodec {
         var dw0 = dw0In
         var qExp = qExpIn
         if (precisionTruncationNeeded > 0) {
-            val truncationResidue: Int = u128ScaleDownPow10(bid128Longs, dw1, dw0, precisionTruncationNeeded)
-            dw1 = bid128Longs[0]
-            dw0 = bid128Longs[1]
+            val truncationResidue: Int = u128ScaleDownPow10(out, dw1, dw0, precisionTruncationNeeded)
+            dw1 = out[0]
+            dw0 = out[1]
             totalResidue = residueMerge(truncationResidue, totalResidue)
             qExp += precisionTruncationNeeded
             verify { calcDigitLen128(dw1, dw0) == 34 }
@@ -1054,17 +1056,17 @@ object Decimal128TextCodec {
             val qExcess = qExp - 6111
             val digitLen = calcDigitLen128(dw1, dw0)
             if (digitLen + qExcess <= 34)
-                bid128FinalizeClamping(bid128Longs, sign, qExp, dw1, dw0)
+                finalizeClamping(out, formatIsBid, sign, qExp, dw1, dw0)
             else
-                bid128FinalizeOverflow(bid128Longs, sign)
+                finalizeOverflow(out, sign)
             return
         }
-        bid128Set(bid128Longs, sign, qExp, dw1, dw0)
+        setFinite(out, formatIsBid, sign, qExp, dw1, dw0)
     }
 
     /**
      * Pack the sign, biased quantum exponent, and 113-bit coefficient into
-     * the BID128 encoding stored in [bid128Longs].
+     * the BID128 encoding stored in [out].
      *
      * Always uses the short-form encoding (combination field top bits not
      * `11`), which is correct for any canonical coefficient whose top 3
@@ -1074,22 +1076,34 @@ object Decimal128TextCodec {
      * control: the exponent must be in [-6176, 6111] and the coefficient
      * must have at most 34 decimal digits.
      */
-    private fun bid128Set(bid128Longs: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+    /**
+     * Pack a finite value into whichever interchange format the caller asked
+     * for. BID and DPD are peers: both carry the same sign, the same 14-bit
+     * biased exponent and the same 34-digit coefficient, and differ only in
+     * how that coefficient is laid out. Everything upstream of this point --
+     * rounding, clamping and the underflow region -- is format-neutral.
+     */
+    private fun setFinite(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+        verify { formatIsBid } // DPD is not wired up yet
+        bid128SetFinite(out, sign, qExp, dw1, dw0)
+    }
+
+    private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         verify { qExp >= -6176 && qExp <= 6111 }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
         val qBiased = qExp + 6176
         val s = if (sign) Long.MIN_VALUE else 0
         val g = qBiased.toLong() shl (3 + 46)
-        bid128Longs[0] = s or g or dw1
-        bid128Longs[1] = dw0
+        out[0] = s or g or dw1
+        out[1] = dw0
     }
 
     /**
-     * Encode `Infinity` (or `-Infinity`) into [bid128Longs].
+     * Encode `Infinity` (or `-Infinity`) into [out].
      */
-    private fun bid128FinalizeOverflow(bid128Longs: LongArray, sign: Boolean) {
-        bid128Longs[0] = (if (sign) Long.MIN_VALUE else 0L) or 0x7800000000000000L
-        bid128Longs[1] = 0L
+    private fun finalizeOverflow(out: LongArray, sign: Boolean) {
+        out[0] = (if (sign) Long.MIN_VALUE else 0L) or 0x7800000000000000L
+        out[1] = 0L
     }
 
     /**
@@ -1105,12 +1119,12 @@ object Decimal128TextCodec {
      * (digitLen + qExcess <= 34); this function asserts the invariant
      * and produces the clamped encoding.
      */
-    private fun bid128FinalizeClamping(bid128Longs: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+    private fun finalizeClamping(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         val qExcess = qExp - 6111
         verify { qExcess > 0 && qExcess <= 34 - calcDigitLen128(dw1, dw0) }
         val (dw1Scaled, dw0Scaled) = umul128xPow10to128(dw1, dw0, qExcess)
         verify { coeffQExpFit(dw1Scaled, dw0Scaled, 6111) }
-        bid128Set(bid128Longs, sign, 6111, dw1Scaled, dw0Scaled)
+        setFinite(out, formatIsBid, sign, 6111, dw1Scaled, dw0Scaled)
     }
 
     /**
@@ -1143,8 +1157,9 @@ object Decimal128TextCodec {
      *  - Truncation is less than the digit count: representable as a
      *    subnormal; some precision is preserved, with rounding.
      */
-    private fun bid128FinalizeUnderflowRegion(
-        bid128Longs: LongArray,
+    private fun finalizeUnderflowRegion(
+        out: LongArray,
+        formatIsBid: Boolean,
         sign: Boolean,
         qExp: Int,
         dw1: Long,
@@ -1160,14 +1175,14 @@ object Decimal128TextCodec {
             truncationNeeded > digitLen -> {
                 // Result is swamped - becomes zero with roundTiesToEven
                 // This is always inexact
-                bid128RoundAndFinalizeFinite(bid128Longs, sign, -6176, 0L, 0L, LT_HALF)
+                roundAndFinalizeFinite(out, formatIsBid, sign, -6176, 0L, 0L, LT_HALF)
             }
 
             truncationNeeded == digitLen ->
-                bid128FinalizeUnderflowBoundary(bid128Longs, sign, dw1, dw0, residue)
+                finalizeUnderflowBoundary(out, formatIsBid, sign, dw1, dw0, residue)
 
             else ->
-                bid128FinalizeSubnormal(bid128Longs, sign, qExp, dw1, dw0, residue)
+                finalizeSubnormal(out, formatIsBid, sign, qExp, dw1, dw0, residue)
         }
     }
 
@@ -1182,8 +1197,8 @@ object Decimal128TextCodec {
      * decision between zero (always even, the default outcome) and 1 ulp
      * (the smallest subnormal, only when total residue is GT_HALF).
      */
-    private fun bid128FinalizeUnderflowBoundary(
-        bid128Longs: LongArray, sign: Boolean,
+    private fun finalizeUnderflowBoundary(
+        out: LongArray, formatIsBid: Boolean, sign: Boolean,
         dw1: Long, dw0: Long, residueIn: Int
     ) {
         val digitLen = calcDigitLen128(dw1, dw0)
@@ -1192,20 +1207,20 @@ object Decimal128TextCodec {
         val totalResidue = residueMerge(scaleResidue, residueIn)
         // roundTiesToEven ...
         // only if we are GT_HALF since otherwise the result is 0 ... which is even
-        bid128Set(bid128Longs, sign, -6176, 0L, if (totalResidue == GT_HALF) 1L else 0L)
+        setFinite(out, formatIsBid, sign, -6176, 0L, if (totalResidue == GT_HALF) 1L else 0L)
     }
 
-    private fun bid128FinalizeSubnormal(
-        bid128Longs: LongArray, sign: Boolean, qExpIn: Int,
+    private fun finalizeSubnormal(
+        out: LongArray, formatIsBid: Boolean, sign: Boolean, qExpIn: Int,
         dw1In: Long, dw0In: Long, residueIn: Int
     ) {
         val truncationNeeded = -6176 - qExpIn
         verify { truncationNeeded > 0 && truncationNeeded < calcDigitLen128(dw1In, dw0In) }
 
-        val scaleResidue = u128ScaleDownPow10(bid128Longs, dw1In, dw0In, truncationNeeded)
+        val scaleResidue = u128ScaleDownPow10(out, dw1In, dw0In, truncationNeeded)
         val totalResidue = residueMerge(scaleResidue, residueIn)
-        var dw1T = bid128Longs[0]
-        var dw0T = bid128Longs[1]
+        var dw1T = out[0]
+        var dw0T = out[1]
         var qExpT = -6176
 
         val roundUp =
@@ -1220,7 +1235,7 @@ object Decimal128TextCodec {
                 ++qExpT
             }
         }
-        bid128Set(bid128Longs, sign, qExpT, dw1T, dw0T)
+        setFinite(out, formatIsBid, sign, qExpT, dw1T, dw0T)
     }
 
 
@@ -1476,11 +1491,11 @@ object Decimal128TextCodec {
 
     /**
      * Divide a 128-bit unsigned coefficient by `10^precisionTruncationNeeded`,
-     * returning the quotient via [bid128Longs] and the round-and-sticky
+     * returning the quotient via [out] and the round-and-sticky
      * residue class as the return value. Truncates in chunks of up to 9
      * digits via [u113DivModPow10Max9].
      */
-    private fun u128ScaleDownPow10(bid128Longs: LongArray, dw1: Long, dw0: Long, precisionTruncationNeeded: Int): Int {
+    private fun u128ScaleDownPow10(out: LongArray, dw1: Long, dw0: Long, precisionTruncationNeeded: Int): Int {
         verify { (dw1 or dw0) != 0L }
         verify { precisionTruncationNeeded > 0 && precisionTruncationNeeded < calcDigitLen128(dw1, dw0) }
         var scaleResidue = EXACT
@@ -1489,9 +1504,9 @@ object Decimal128TextCodec {
         var digitsRemaining = precisionTruncationNeeded
         do {
             val stepPow10 = min(digitsRemaining, 9)
-            val rem = u113DivModPow10Max9(bid128Longs, dw1T, dw0T, stepPow10)
-            dw1T = bid128Longs[0]
-            dw0T = bid128Longs[1]
+            val rem = u113DivModPow10Max9(out, dw1T, dw0T, stepPow10)
+            dw1T = out[0]
+            dw0T = out[1]
             val stepResidue = residueFromValuePow10(0L, rem, stepPow10)
             scaleResidue = residueMerge(stepResidue, scaleResidue)
             digitsRemaining -= stepPow10
