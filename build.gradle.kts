@@ -44,9 +44,6 @@ kotlin {
     sourceSets {
         commonTest.dependencies {
             implementation(kotlin("test"))
-            // Encode oracle for TestBidToString / TestHexBidToString. Test-only:
-            // the published codec has no runtime dependencies.
-            implementation("com.decimal128:decimal128-kotlin:0.9.0")
         }
     }
 }
