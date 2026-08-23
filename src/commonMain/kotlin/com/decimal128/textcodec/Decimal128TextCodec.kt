@@ -851,8 +851,9 @@ object Decimal128TextCodec {
      * `NaN(1`, `NaN(1]` and `NaN()` are all rejected, and `NaN[1]` / `NaN{1}`
      * are not this form at all.
      *
-     * This is the one place the codecs accept text the full decimal128 ports
-     * reject, and it is deliberate: C's own `strtod` reads
+     * The full decimal128 ports accept the same spelling; the codecs had it
+     * first, and the ports took it on 2026-08-23. The reason it exists at all
+     * is that C's own `strtod` reads
      * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
      * platform itself. The resemblance stops at the parentheses -- strtod's
      * sequence is letters, digits and underscores read as an

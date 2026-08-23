@@ -34,13 +34,13 @@ is the GDAS `to-scientific-string` form and is not configurable — the exponent
 sign is always written (`6.02E+23`), and cohort information is preserved. No
 arithmetic, no field extraction, no value-type wrapper.
 
-Accepted input matches what the full `decimal128-{lang}` ports accept, with one
-exception: **a NaN payload may be parenthesised**, `NaN(123)` as well as
-`NaN123`, matching the spelling C's `strtod` reads. The form is positional and
-balanced — `(` immediately after the word, at least one digit, `)` last — so
-`NaN()`, `NaN(1`, `NaN(1)2(3)`, `NaN[1]` and `NaN{1}` are all rejected.
-Rendering never emits parentheses. This is the one construct the codecs accept
-that the full ports reject.
+Accepted input matches what the full `decimal128-{lang}` ports accept. That
+includes the parenthesised NaN payload: **`NaN(123)` as well as `NaN123`**,
+matching the spelling C's `strtod` reads. The form is positional and balanced —
+`(` immediately after the word, at least one digit, `)` last — so `NaN()`,
+`NaN(1`, `NaN(1)2(3)`, `NaN[1]` and `NaN{1}` are all rejected. Rendering never
+emits parentheses. The codecs had this before the ports did; the ports took it
+on 2026-08-23, closing the family's one grammar divergence.
 
 For the full decimal128 implementation see `decimal128-kotlin` at
 <https://decimal128.com>.
