@@ -15,8 +15,11 @@ name: ci
 # macosX64 is deliberately absent. Intel macOS runners are being retired, and
 # x86 native coverage comes from linuxX64 instead.
 #
-# No submodules: the conformance vectors are vendored into commonTest, so a
-# plain checkout is enough.
+# The conformance vectors come from decimal128-resources, mounted as a submodule
+# at <repo>/resources, so both checkouts need `submodules: recursive` -- without
+# it every corpus test fails with the `git submodule update` hint rather than
+# quietly passing on no rows. The 84,764-row canonical table comes with it, and
+# now runs on every target.
 
 on:
   push:
@@ -28,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -41,6 +46,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-java@v5
         with:
           distribution: temurin

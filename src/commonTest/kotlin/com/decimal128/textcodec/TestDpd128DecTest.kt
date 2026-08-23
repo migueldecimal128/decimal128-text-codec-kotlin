@@ -23,7 +23,7 @@ import kotlin.test.assertNull
  * suite by Mike Cowlishaw, `dqEncode.decTest` and `dqCanonical.decTest`.
  *
  * These are a third oracle, independent both of this codec and of the
- * decimal128-c engine that generated the `string_bid_dpd` corpus. They are
+ * decimal128-c engine that generated the `text_bid_dpd` corpus. They are
  * transcribed here rather than read from disk so that every Kotlin target
  * runs them, `commonTest` having no portable file access.
  *
