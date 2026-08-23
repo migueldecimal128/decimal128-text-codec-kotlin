@@ -281,12 +281,12 @@ object Decimal128TextCodec {
                 //   exponent E is formed from G0 through Gw+1 and the significand
                 //   is formed from bits Gw+2 through the end of the encoding (including T).
                 //
-                // w+5=13 w=8 Gw+1=G9 Gw+2=G10
-                // the top 10 bits of the combination field represent the biased exponent ...
+                // w+5=17 w=12 Gw+1=G13 Gw+2=G14
+                // the top 14 bits of the combination field represent the biased exponent ...
                 val biasedExponentE = combination shr 3
                 qExp = biasedExponentE - bias
                 // ... and the bottom 3 bits are the most significant bits of the significand
-                // coeff/significant is 3 + 50 == 53 ... but that's not all ... see below
+                // coeff/significand is 3 + 110 == 113 ... but that's not all ... see below
                 coeffHi = (combination and 0x07).toLong()
             }
 
@@ -297,7 +297,7 @@ object Decimal128TextCodec {
                 //  G2 through Gw+3 and the significand is formed by prefixing
                 //  the 4 bits (8 + Gw+4) to T.
                 //
-                // w+5=13 w=8 Gw+3=G11 Gw+4=G12
+                // w+5=17 w=12 Gw+3=G15 Gw+4=G16
                 //
                 val biasedExponentE = (combination ushr 1) and ((1 shl (w5 - 5 + 2)) - 1)
                 qExp = biasedExponentE - bias
