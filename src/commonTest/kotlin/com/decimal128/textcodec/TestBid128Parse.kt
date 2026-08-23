@@ -326,10 +326,18 @@ class TestBid128Parse {
         TC("[7C00000000000000,0000000000003039]", "NaN12345"),
         TC("[7E00000000000000,0000000000000001]", "sNaN1"),
         TC("[7C00000000000000,0000000000000001]", "qNaN1"),
-        TC("[7C00000000000000,000000000000007B]", "NaN(123)"),
-        TC("[7C00000000000000,000000000000007B]", "NaN[123]"),
-        TC("[7C00000000000000,000000000000007B]", "NaN{123}"),
-        TC("[7C00000000000000,000000000000007B]", "NaN(1)2(3)"),
+        // The base accepted brackets around a NaN payload, and skipped them
+        // anywhere, so "NaN(1)2(3)" parsed as payload 123. The full ports
+        // reject all of these; the shared error corpus classes NaN(1) and
+        // NaN(123) as FAILURE_PARSING_NAN. Rejected here to match.
+        TC("invalid", "NaN(123)"),
+        TC("invalid", "NaN[123]"),
+        TC("invalid", "NaN{123}"),
+        TC("invalid", "NaN(1)2(3)"),
+        TC("invalid", "NaN(1)"),
+        TC("invalid", "sNaN(5)"),
+        TC("invalid", "NaN)1("),
+        TC("invalid", "NaN 1"),
         TC("[7C00314DC6448D93,38C15B09FFFFFFFF]", "NaN999999999999999999999999999999999"),
         TC("[7C0004EE2D6D415B,85ACEF8100000000]", "NaN100000000000000000000000000000000"),
         TC("[7C00000000000000,0000000000000000]", "NaN9999999999999999999999999999999999"),
@@ -345,6 +353,13 @@ class TestBid128Parse {
         TC("invalid", "+"),
         TC("invalid", "-"),
         TC("invalid", "."),
+// === NaN payload: the 33-digit limit counts digits as written ===
+        TC("[7C00000000000000,0000000000000001]", "NaN0001"),
+        TC("[7C00000000000000,0000000000000001]", "NaN" + "0".repeat(32) + "1"),   // 33 written: kept
+        TC("[7C00314DC6448D93,38C15B09FFFFFFFF]", "NaN" + "9".repeat(33)),          // 33 written: kept
+        TC("[7C00000000000000,0000000000000000]", "NaN" + "0".repeat(33) + "1"),   // 34 written: zeroed
+        TC("[7C00000000000000,0000000000000000]", "NaN" + "9".repeat(34)),          // 34 written: zeroed
+        TC("[7C00000000000000,0000000000000000]", "NaN" + "0".repeat(40) + "1"),   // 41 written: zeroed
 // === Signed positive exponents on input ===
         TC("[304A000000000000,0000000000000001]", "1E+5"),
         TC("[304A000000000000,0000000000000001]", "1e+5"),
@@ -428,6 +443,35 @@ class TestBid128Parse {
         assertNull(observed)
         val observedHex = "[${hex16(longs[0])},${hex16(longs[1])}]"
         assertEquals(tc.expectedHex.uppercase(), observedHex)
+    }
+
+    /**
+     * The NaN payload rules live in the shared parser, so both formats must
+     * apply them identically -- bracket rejection and the written-digit limit
+     * alike.
+     */
+    @Test
+    fun nanPayloadRulesAreSharedByBothFormats() {
+        for (str in arrayOf(
+            "NaN(1)", "NaN[1]", "sNaN(5)", "NaN)1(",
+            "NaN1", "NaN0001",
+            "NaN" + "0".repeat(32) + "1",
+            "NaN" + "9".repeat(33),
+            "NaN" + "9".repeat(34),
+            "NaN" + "0".repeat(40) + "1",
+        )) {
+            val b = LongArray(2)
+            val d = LongArray(2)
+            val bErr = Decimal128TextCodec.bid128Parse(b, str)
+            val dErr = Decimal128TextCodec.dpd128Parse(d, str)
+            assertEquals(bErr, dErr, "the formats disagree on <" + str + ">")
+            // payloads below 10 encode the same either way, so those cases
+            // must produce identical bits in both formats
+            if (bErr == null && b[1] <= 9L) {
+                assertEquals(b[0], d[0], "<" + str + ">")
+                assertEquals(b[1], d[1], "<" + str + ">")
+            }
+        }
     }
 
     private fun hex16(v: Long): String =

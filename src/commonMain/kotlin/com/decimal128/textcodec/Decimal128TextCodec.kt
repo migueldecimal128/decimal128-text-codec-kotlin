@@ -876,18 +876,19 @@ object Decimal128TextCodec {
             do {
                 if (ch >= '0' && ch <= '9') {
                     val d = ch - '0'
-                    // flush leading zeros from payload ... don't increment
-                    accumDigitCount += (-(accumDigitCount or d)) ushr 31
+                    // Count every digit written, leading zeros included. The
+                    // 33-digit limit below is a limit on the payload as spelled,
+                    // not on its significant digits, so "NaN" followed by forty
+                    // zeros and a one is over the limit and reads as zero.
+                    // Leading zeros contribute nothing to the accumulators, so
+                    // the value of a payload within the limit is unaffected.
+                    ++accumDigitCount
                     if (accumDigitCount <= 19)
                         accum19a = (accum19a * 10L) + d.toLong()
                     else
                         accum19b = (accum19b * 10L) + d.toLong()
                 } else {
-                    if (ch != '(' && ch != ')' &&
-                        ch != '[' && ch != ']' &&
-                        ch != '{' && ch != '}'
-                    )
-                        return "non-digit NaN payload character"
+                    return "non-digit NaN payload character"
                 }
                 ch = txt.nextChar()
             } while (ch.code != 0)
