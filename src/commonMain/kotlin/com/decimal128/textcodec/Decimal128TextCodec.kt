@@ -201,6 +201,30 @@ object Decimal128TextCodec {
         return errorStr
     }
 
+    /**
+     * Parse a decimal string into a DPD128 value, writing the result into
+     * [out].
+     *
+     * The peer of [bid128Parse]. Identical grammar, identical rounding, and
+     * identical failure behaviour -- the two differ only in the encoding
+     * written to [out]. On failure [out] receives the canonical quiet NaN,
+     * which is the same bit pattern in both formats.
+     *
+     * @param out receives the DPD128 encoding; must have size >= 2. Index 0
+     *   takes the high 64 bits, index 1 the low 64.
+     * @param str the string to parse
+     * @return `null` on success, or an error message
+     */
+    fun dpd128Parse(out: LongArray, str: String): String? {
+        require(out.size >= 2) { "out must have size >= 2, was ${out.size}" }
+        val errorStr = encodeStringOrError(out, formatIsBid = false, str = str)
+        if (errorStr != null) {
+            out[0] = 0x7C00000000000000L
+            out[1] = 0x0000000000000000L
+        }
+        return errorStr
+    }
+
     // -- decode to String --------------------------------------------------------
 
     // 10**34 ... has 35 digits ... maxx = max eXclusive
@@ -776,7 +800,7 @@ object Decimal128TextCodec {
         if (chLower == 'i')
             return parseInfinityText(out, sign, ch, txt)
         if (chLower == 'n' || chLower == 's' || chLower == 'q')
-            return parseNanText(out, sign, ch, txt)
+            return parseNanText(out, formatIsBid, sign, ch, txt)
         if (chFirst == '\u0000')
             return "empty string"
         return "invalid format"
@@ -831,7 +855,7 @@ object Decimal128TextCodec {
      * Payloads of 34+ significant digits are non-canonical and produce a
      * zero payload per IEEE 754-2019 §3.5.2.
      */
-    private fun parseNanText(out: LongArray, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
+    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Char, txt: StringIterator): String? {
         var ch = chFirst
         val hasS = (ch.code or 0x20) == 's'.code
         val hasQ = (ch.code or 0x20) == 'q'.code
@@ -884,11 +908,57 @@ object Decimal128TextCodec {
                 }
             }
         }
+        setNaN(out, formatIsBid, sign, hasS, payloadDw1, payloadDw0)
+        return null
+    }
+
+    /**
+     * Pack a NaN into whichever interchange format the caller asked for.
+     *
+     * A NaN payload is a coefficient, so the formats diverge here exactly as
+     * they do for finite values: BID keeps it as a binary integer, DPD as
+     * declets. Infinity by contrast has no coefficient, which is why it is
+     * byte-identical in both and needs no such split.
+     */
+    private fun setNaN(out: LongArray, formatIsBid: Boolean, sign: Boolean,
+                       isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
+        if (formatIsBid)
+            bid128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+        else
+            dpd128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+    }
+
+    private fun bid128SetNaN(out: LongArray, sign: Boolean,
+                             isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
         val withoutPayload =
-            (if (hasS) 0x7E00000000000000 else 0x7C00000000000000) or (if (sign) Long.MIN_VALUE else 0L)
+            (if (isSignaling) 0x7E00000000000000 else 0x7C00000000000000) or (if (sign) Long.MIN_VALUE else 0L)
         out[0] = withoutPayload or payloadDw1
         out[1] = payloadDw0
-        return null
+    }
+
+    /**
+     * Pack a NaN into DPD128. The payload occupies the whole 110-bit trailing
+     * field as eleven declets -- 33 digits, with no leading digit in the
+     * combination field, since G0..G4 are fixed at 11111 and G5 carries the
+     * signaling flag.
+     *
+     * [out] doubles as scratch for the two divisions before it is written.
+     */
+    private fun dpd128SetNaN(out: LongArray, sign: Boolean,
+                             isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
+        verify { calcDigitLen128(payloadDw1, payloadDw0) <= 33 }
+
+        val r1 = u113DivModPow10Max9(out, payloadDw1, payloadDw0, 9)
+        val r2 = u113DivModPow10Max9(out, out[0], out[1], 9)
+        val binLo = (r2 * 1_000_000_000L) + r1
+        verify { out[0] == 0L } // a 33-digit payload leaves 15 digits up top
+        val declets5Hi = decletsFromBin(out[1])
+        val declets6Lo = decletsFromBin(binLo)
+
+        val gField = (0b11111 shl 12) or (if (isSignaling) 1 shl 11 else 0)
+        val signCombo = ((if (sign) 1 else 0) shl 17) or gField
+        out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
+        out[1] = (declets5Hi shl 60) or declets6Lo
     }
 
     /**
