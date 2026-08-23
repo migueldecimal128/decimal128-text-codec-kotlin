@@ -120,6 +120,27 @@ object Decimal128TextCodec {
     }
 
     /**
+     * Render a DPD128 value as a decimal string.
+     *
+     * The peer of [bid128ToString]. DPD128 carries the same sign, the same
+     * 14-bit biased exponent and the same 34-digit coefficient; it differs
+     * only in storing that coefficient as a leading digit plus eleven 10-bit
+     * declets rather than as a binary integer.
+     *
+     * This method cannot fail. Unlike BID128 there is no coefficient-too-large
+     * case to guard: a leading digit of at most 9 followed by eleven declets
+     * cannot exceed 10^34 - 1, so every DPD128 pattern denotes a representable
+     * value. Non-canonical declets decode to their value, per IEEE 754-2019.
+     *
+     * @param dpd128Hi high 64 bits of the DPD128 encoding
+     * @param dpd128Lo low 64 bits of the DPD128 encoding
+     * @return the decimal string form of the DPD128 value
+     */
+    fun dpd128ToString(dpd128Hi: Long, dpd128Lo: Long): String {
+        return decodeDpd128toString(dpd128Hi, dpd128Lo)
+    }
+
+    /**
      * Parse a decimal string into a BID128 value, writing the result into
      * [out].
      *
@@ -287,6 +308,83 @@ object Decimal128TextCodec {
         ) {
             return zerString(sign, qExp)
         }
+        return fnzString(sign, qExp, dw1, dw0)
+    }
+
+    /**
+     * Unpack a DPD128 encoding and hand the pieces to the shared renderers.
+     *
+     * The peer of [decodeBid128toString]: both reduce an encoding to
+     * `(sign, qExp, coefficient)` and then dispatch to the same four
+     * renderers, which have never seen an interchange format.
+     */
+    private fun decodeDpd128toString(dpd128Hi: Long, dpd128Lo: Long): String {
+        val bias = 6176
+        val w = 12  // exponent continuation width
+        val w5 = 17 // combination field width in bits
+        val t = 110 // trailing significand field width in bits
+
+        val sign = dpd128Hi < 0L
+        val combination = (dpd128Hi shr (t - 64)).toInt() and 0x1FFFF
+        // in DPD the low w bits of the biased exponent always sit at the bottom of G
+        val expContinuation = combination and 0x0FFF
+
+        val d0: Long
+        val qExp: Int
+        var isNaN = false
+        var isSignaling = false
+
+        when {
+            // G0G1 is 00, 01 or 10: leading digit 0..7, exponent MSBs in G0G1
+            combination shr (w5 - 2) != 0b11 -> {
+                val expMSB = combination shr (w5 - 2)
+                qExp = ((expMSB shl w) or expContinuation) - bias
+                d0 = ((combination shr w) and 0b111).toLong()
+            }
+
+            // G0G1 is 11 and G2G3 is not 11: leading digit 8..9, exponent MSBs in G2G3
+            combination shr (w5 - 4) != 0b1111 -> {
+                val expMSB = (combination shr (w5 - 4)) and 0b11
+                qExp = ((expMSB shl w) or expContinuation) - bias
+                d0 = 8L + ((combination shr w) and 0b1).toLong()
+            }
+
+            (combination shr (w5 - 5)) == 0b11110 -> {
+                return infString(sign)
+            }
+
+            else -> {
+                verify { (combination shr (w5 - 5)) == 0b11111 }
+                isNaN = true
+                isSignaling = ((combination shr (w5 - 6)) and 1) != 0
+                d0 = 0L
+                qExp = 0
+            }
+        }
+
+        // Rebuild the binary coefficient from the declets. The leading digit
+        // rides along as a sixth declet of the high group: values 0..9 encode
+        // to themselves as a declet, so it decodes back unchanged.
+        val decletsHi = (d0 shl 50) or ((dpd128Hi and 0x3FFFFFFFFFFFL) shl 4) or (dpd128Lo ushr 60)
+        val decletsLo = dpd128Lo and 0x0FFFFFFFFFFFFFFFL // low 60 bits, six declets
+        val binHi = binFromDeclets(decletsHi)
+        val binLo = binFromDeclets(decletsLo)
+
+        val dw1: Long
+        val dw0: Long
+        if (binHi == 0L) {
+            dw1 = 0L
+            dw0 = binLo
+        } else {
+            dw0 = (binHi * TEN_POW_18) + binLo
+            val carry = if (unsignedLT(dw0, binLo)) 1L else 0L
+            dw1 = unsignedMulHi(binHi, TEN_POW_18) + carry
+        }
+
+        if (isNaN)
+            return nanString(sign, isSignaling, dw1, dw0)
+        if ((dw1 or dw0) == 0L)
+            return zerString(sign, qExp)
         return fnzString(sign, qExp, dw1, dw0)
     }
 
@@ -1084,8 +1182,53 @@ object Decimal128TextCodec {
      * rounding, clamping and the underflow region -- is format-neutral.
      */
     private fun setFinite(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        verify { formatIsBid } // DPD is not wired up yet
-        bid128SetFinite(out, sign, qExp, dw1, dw0)
+        if (formatIsBid)
+            bid128SetFinite(out, sign, qExp, dw1, dw0)
+        else
+            dpd128SetFinite(out, sign, qExp, dw1, dw0)
+    }
+
+    /**
+     * Pack a finite value into DPD128. The peer of [bid128SetFinite]: same
+     * inputs, same sign bit, same 14-bit biased exponent, and a coefficient
+     * of the same 34 digits -- laid out as a leading digit carried in the
+     * combination field plus eleven declets.
+     *
+     * The leading digit cannot be packed independently of the exponent: DPD
+     * puts it in the same five-bit prefix as the exponent's top two bits, so
+     * unlike BID there is no shared "pack sign and exponent" step to factor out.
+     *
+     * [out] doubles as scratch for the two divisions before it is written.
+     */
+    internal fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+        verify { qExp >= -6176 && qExp <= 6111 }
+        verify { calcDigitLen128(dw1, dw0) <= 34 }
+
+        // Split the coefficient into its low 18 digits and its high 16.
+        // Two divisions by 10^9 rather than one by 10^18, so the existing
+        // 128-bit kernel does the work and no wider machinery is needed.
+        val r1 = u113DivModPow10Max9(out, dw1, dw0, 9)
+        val r2 = u113DivModPow10Max9(out, out[0], out[1], 9)
+        val binLo = (r2 * 1_000_000_000L) + r1
+        verify { out[0] == 0L } // the high 16 digits fit in one word
+        val binHi = out[1]
+
+        // the top digit rides in the combination field; the other 15 are declets
+        val d0 = binHi / TEN_POW_15
+        val declets5Hi = decletsFromBin(binHi - (d0 * TEN_POW_15))
+        val declets6Lo = decletsFromBin(binLo)
+        verify { d0 in 0L..9L }
+
+        val biasedQExp = qExp + 6176
+        val expMSB = (biasedQExp shr 12) and 0x3
+        val expLSB = biasedQExp and 0x0FFF
+        val gPrefix =
+            if (d0 <= 7L) (expMSB shl 3) or d0.toInt()          // G0G1 = exponent MSBs
+            else 0b11000 or (expMSB shl 1) or (d0.toInt() and 1) // G0G1 = 11, digit is 8 or 9
+        val signCombo = ((if (sign) 1 else 0) shl 17) or (gPrefix shl 12) or expLSB
+
+        out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
+        out[1] = (declets5Hi shl 60) or declets6Lo
     }
 
     private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
@@ -1292,6 +1435,47 @@ object Decimal128TextCodec {
     //
     // Both are `internal` rather than `private` so the tests can reach them;
     // `internal` is module-scoped, so this does not widen the published API.
+
+    private const val TEN_POW_15 = 1_000_000_000_000_000L
+    private const val TEN_POW_18 = 1_000_000_000_000_000_000L
+
+    /**
+     * Decode up to seven packed DPD declets into a binary integer.
+     *
+     * Declets are ten bits each, least significant first. The topmost may be
+     * narrower than ten bits, which is how the coefficient's leading digit is
+     * carried: 0..9 encodes to itself as a declet.
+     */
+    private fun binFromDeclets(declets: Long): Long {
+        var bin = 0L
+        var rest = declets
+        var multiplier = 1L
+        while (rest != 0L) {
+            bin += dpdDecodeDeclet(rest and 0x3FFL) * multiplier
+            multiplier *= 1000L
+            rest = rest ushr 10
+        }
+        return bin
+    }
+
+    /**
+     * Encode a binary integer of at most 18 digits into six packed declets,
+     * least significant first. The inverse of [binFromDeclets] over that range.
+     */
+    private fun decletsFromBin(bin: Long): Long {
+        verify { bin >= 0L && bin < TEN_POW_18 }
+        var rest = bin
+        var declets = 0L
+        var shift = 0
+        while (rest != 0L) {
+            // reciprocal-multiply divide by 1000
+            val q = unsignedMulHi(rest, 0x020C49BA5E353F7DL) ushr 3
+            declets = declets or (dpdEncodeDeclet(rest - (q * 1000L)) shl shift)
+            shift += 10
+            rest = q
+        }
+        return declets
+    }
 
     /**
      * Decode a 10-bit DPD declet (bits 9..0) into `0..999`.
