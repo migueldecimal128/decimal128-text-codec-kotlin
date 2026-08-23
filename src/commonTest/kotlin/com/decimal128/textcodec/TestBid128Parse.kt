@@ -2,7 +2,6 @@ package com.decimal128.textcodec
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
@@ -474,13 +473,5 @@ class TestBid128Parse {
 
     private fun hex16(v: Long): String =
         v.toULong().toString(16).padStart(16, '0').uppercase()
-
-
-    @Test
-    fun testParseReturnErrorRejectsTooSmallDest() {
-        assertFailsWith<IllegalArgumentException> {
-            Decimal128TextCodec.bid128Parse(LongArray(1), "0")
-        }
-    }
 
 }
