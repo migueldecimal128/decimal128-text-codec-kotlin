@@ -1,0 +1,50 @@
+name: ci
+
+# The codec is one file with no runtime dependencies, so CI exists to cover the
+# targets a developer's host cannot execute rather than to re-run what already
+# passes locally.
+#
+# linuxX64 is the reason this file exists: it compiles and links on a macOS host
+# but never runs there, so until now no machine had ever executed it. The Linux
+# job also carries jvm and js, which are cheap there.
+#
+# The macOS job covers the Apple targets. GitHub Actions sets CI in the
+# environment, which is what enables iosSimulatorArm64Test -- it is gated off
+# locally so a routine ./gradlew allTests stays fast.
+#
+# macosX64 is deliberately absent. Intel macOS runners are being retired, and
+# x86 native coverage comes from linuxX64 instead.
+#
+# No submodules: the conformance vectors are vendored into commonTest, so a
+# plain checkout is enough.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: jvm + js + linuxX64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Test
+        run: ./gradlew jvmTest jsNodeTest linuxX64Test --console=plain
+
+  macos:
+    name: macosArm64 + iosSimulatorArm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Test
+        run: ./gradlew macosArm64Test iosSimulatorArm64Test --console=plain
