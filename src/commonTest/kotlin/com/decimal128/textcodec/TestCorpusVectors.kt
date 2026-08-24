@@ -19,14 +19,14 @@ import kotlin.test.assertTrue
  *
  *   T1 DECODE  bid -> text and dpd -> text          (100, noncanonical)
  *   T2 ENCODE  text -> bid and text -> dpd          (100)
- *   T3 PARSE   input text -> bits, both formats     (parse, 945 rows)
+ *   T3 PARSE   input text -> bits, both formats     (parse, 1,052 rows)
  *   T4 ERROR   malformed input text -> rejection    (error, 133 rows)
  *
  * Plus the cross-format assertion: for every row both encodings must render to
  * the same text. That is the strongest property the corpus encodes.
  *
- * The fifth table, `canonical`, is 84,764 rows of mostly common-path volume and
- * runs as its own class, [TestCanonicalCorpus].
+ * The fifth table, `canonical`, is 84,783 rows of mostly common-path volume and
+ * runs as [TestCanonicalCorpus], the second class in this file.
  */
 class TestCorpusVectors {
 
@@ -110,32 +110,50 @@ class TestCorpusVectors {
         assertTrue(texts.any { it.endsWith(" ") }, "a trailing-space row was lost")
         assertTrue(texts.any { it.contains(",") }, "an embedded-comma row was lost")
     }
+}
 
-    companion object {
+/**
+ * Every row: both encodings must render to the expected text, and
+ * therefore to each other.
+ */
+private fun runDecodeTable(rows: List<CorpusRow>, label: String) {
+    for (row in rows) {
+        assertEquals(row.text, Decimal128TextCodec.bid128ToString(row.bidHi, row.bidLo),
+            label + " line " + row.lineNumber + ": bid #" + row.bidHex)
+        assertEquals(row.text, Decimal128TextCodec.dpd128ToString(row.dpdHi, row.dpdLo),
+            label + " line " + row.lineNumber + ": dpd #" + row.dpdHex)
+    }
+}
 
-        /**
-         * Every row: both encodings must render to the expected text, and
-         * therefore to each other.
-         */
-        fun runDecodeTable(rows: List<CorpusRow>, label: String) {
-            for (row in rows) {
-                assertEquals(row.text, Decimal128TextCodec.bid128ToString(row.bidHi, row.bidLo),
-                    label + " line " + row.lineNumber + ": bid #" + row.bidHex)
-                assertEquals(row.text, Decimal128TextCodec.dpd128ToString(row.dpdHi, row.dpdLo),
-                    label + " line " + row.lineNumber + ": dpd #" + row.dpdHex)
-            }
-        }
+/** Round-trippable rows: the text must encode back to the same bits. */
+private fun runEncodeTable(rows: List<CorpusRow>, label: String) {
+    for (row in rows) {
+        val b = bidParse(row.text)
+        assertNull(b.error, label + " line " + row.lineNumber + ": bid rejected <" + row.text + ">")
+        assertEquals(row.bidHex, b.hex, label + " line " + row.lineNumber + ": bid <" + row.text + ">")
+        val d = dpdParse(row.text)
+        assertNull(d.error, label + " line " + row.lineNumber + ": dpd rejected <" + row.text + ">")
+        assertEquals(row.dpdHex, d.hex, label + " line " + row.lineNumber + ": dpd <" + row.text + ">")
+    }
+}
 
-        /** Round-trippable rows: the text must encode back to the same bits. */
-        fun runEncodeTable(rows: List<CorpusRow>, label: String) {
-            for (row in rows) {
-                val b = bidParse(row.text)
-                assertNull(b.error, label + " line " + row.lineNumber + ": bid rejected <" + row.text + ">")
-                assertEquals(row.bidHex, b.hex, label + " line " + row.lineNumber + ": bid <" + row.text + ">")
-                val d = dpdParse(row.text)
-                assertNull(d.error, label + " line " + row.lineNumber + ": dpd rejected <" + row.text + ">")
-                assertEquals(row.dpdHex, d.hex, label + " line " + row.lineNumber + ": dpd <" + row.text + ">")
-            }
-        }
+/**
+ * The full canonical table: 84,783 rows, read from the same submodule as the
+ * rest. It is a separate class only because it is two orders of magnitude bigger
+ * than the other four put together, not because it is optional -- keeping it
+ * here rather than in a file of its own is what lets the two table runners above
+ * stay private to this file.
+ *
+ * These rows were out of reach while the corpus was transcribed into Kotlin
+ * source -- at that density they would have been some 7 MB of it.
+ */
+class TestCanonicalCorpus {
+
+    @Test
+    fun canonicalTableDecodesAndReEncodes() {
+        val rows = Corpus.load(Corpus.CANONICAL)
+        assertEquals(84783, rows.size)
+        runDecodeTable(rows, "canonical")
+        runEncodeTable(rows, "canonical")
     }
 }

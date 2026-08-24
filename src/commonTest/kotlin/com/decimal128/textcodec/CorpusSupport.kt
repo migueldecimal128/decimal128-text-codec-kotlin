@@ -40,7 +40,7 @@ fun hex(a: Long, b: Long): String =
  * These vectors used to be transcribed into Kotlin source, because `commonTest`
  * has no portable file access and a data file would have needed a reader per
  * target. That reader now exists ([loadTestResourceAsString]), so every target
- * reads the tables themselves -- which also brings the 84,764-row `canonical`
+ * reads the tables themselves -- which also brings the 84,783-row `canonical`
  * table within reach, at 10 MB far past what transcription could carry.
  *
  * The row counts are asserted by the tests, and that is not ceremony: the text
