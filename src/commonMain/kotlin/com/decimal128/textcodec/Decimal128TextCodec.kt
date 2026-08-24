@@ -1311,7 +1311,7 @@ object Decimal128TextCodec {
      *
      * [out] doubles as scratch for the two divisions before it is written.
      */
-    internal fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+    private fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         verify { qExp >= -6176 && qExp <= 6111 }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
 
@@ -1602,7 +1602,7 @@ object Decimal128TextCodec {
      * Mapping: bit9..bit0 as `p q r s t u v w x y`. Handles non-canonical
      * declets as well as canonical ones, per Cowlishaw's dpd2bcd.
      */
-    internal fun dpdDecodeDeclet(declet: Long): Long {
+    private fun dpdDecodeDeclet(declet: Long): Long {
         verify { declet in 0..1023 }
 
         if (declet == 0L)
@@ -1659,7 +1659,7 @@ object Decimal128TextCodec {
      * declets decode to a value that re-encodes to the canonical declet for
      * that value, so encode(decode(x)) == x only for canonical x.
      */
-    internal fun dpdEncodeDeclet(n: Long): Long {
+    private fun dpdEncodeDeclet(n: Long): Long {
         verify { n in 0..999 }
 
         if (n == 0L)
