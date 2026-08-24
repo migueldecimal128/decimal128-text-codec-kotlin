@@ -7,29 +7,28 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Thin codec for converting between BID128 binary representations and
- * decimal string form, per IEEE 754-2019 decimal floating point.
+ * Thin codec for converting between decimal128 interchange encodings
+ * and decimal string form, per IEEE 754-2019 decimal floating point.
  *
  * IEEE 754-2019 specifies two interchange formats for decimal128. This
- * codec implements only the BID (Binary Integer Decimal) format. The
- * alternative DPD (Densely Packed Decimal) format is not supported.
+ * codec implements both: BID (Binary Integer Decimal) and DPD (Densely
+ * Packed Decimal).
  *
- * BID128 values are represented in this API as a pair of 64-bit longs:
+ * Values are represented in this API as a pair of 64-bit longs:
  * `dw1` holds the high 64 bits of the encoding, `dw0` the low 64 bits.
  * Together they form a 128-bit value containing a sign bit, a biased
- * exponent, and a 113-bit binary coefficient that represents up to 34
- * decimal digits.
+ * exponent, and a coefficient that represents up to 34 decimal digits.
  *
  * This object provides no arithmetic, no field extraction, and no
  * value-type wrapper — only string conversion in both directions. For
  * the full IEEE 754-2019 decimal128 implementation (arithmetic,
  * comparison, all rounding-direction attributes, IEEE status flags,
- * etc.), see the `decimal128-kotlin` artifact at https://decimal128.com.
+ * etc.), see https://decimal128.com.
  *
  * Rounding, when required, uses the IEEE 754-2019 `roundTiesToEven`
  * rounding-direction attribute. Other rounding directions are not
  * configurable; callers requiring different rounding behavior should
- * use the full `decimal128-kotlin` library.
+ * use the full library.
  *
  * ## Implementation
  *
@@ -38,10 +37,10 @@ import kotlin.math.min
  *
  * ## Round-trip behavior
  *
- * Canonical inputs round-trip exactly: `bid128Parse` followed by
- * `bid128ToString` produces the original string, and `bid128ToString` followed by
- * `bid128Parse` produces the original bits. Three classes of input
- * do not round-trip:
+ * Canonical inputs round-trip exactly, in either encoding: a parse
+ * followed by the matching render produces the original string, and a
+ * render followed by the matching parse produces the original bits.
+ * Three classes of input do not round-trip:
  *
  *  - **Strings with more than 34 significant digits** are accepted
  *    and rounded to 34 digits using `roundTiesToEven`. The rounded
@@ -52,31 +51,33 @@ import kotlin.math.min
  *    Strings whose magnitude is below the smallest representable
  *    subnormal underflow to zero.
  *
- *  - **Non-canonical bit patterns** (those whose coefficient field
- *    decodes to 10^34 or greater) decode to a string representation
- *    of zero at the encoded exponent. Re-parsing that string produces
- *    the canonical zero encoding for that exponent, which differs
- *    from the original non-canonical bit pattern. See the next
+ *  - **Non-canonical bit patterns** render as text the canonical
+ *    encoder would never have produced from those bits. Re-parsing
+ *    that text yields the canonical encoding of the same value,
+ *    which differs from the original bit pattern. See the next
  *    section for details on non-canonical handling.
  *
  * ## Non-canonical bit patterns
  *
- * Not all 128-bit patterns represent legal BID128 values. A bit pattern
- * whose coefficient field decodes to 10^34 or greater is non-canonical;
- * IEEE 754-2019 specifies that such patterns are read as zero, with
- * the sign and biased exponent of the encoding preserved. `bid128ToString`
- * implements this rule: a non-canonical encoding produces a string
- * representation of zero at the encoded exponent (e.g., `"0E+215"`),
- * not the literal coefficient value.
+ * Not all BID128/DPD128 bit patterns represent legal canonical values.
+ * Each encoding has its own non-canonical forms — patterns the canonical
+ * encoder would never emit; what makes a pattern non-canonical is a
+ * property of that encoding and is documented on the function that
+ * decodes it.
  *
- * Non-canonical bit patterns do not arise from `bid128Parse` or
- * any other normal use of the codec; they can only appear when BID128
- * values are obtained from external sources such as network or file
- * data.
+ * Neither renderer can fail on one. `bid128ToString` and `dpd128ToString`
+ * accept every 128-bit pattern and render the value IEEE 754-2019 assigns
+ * it. Decoding is one-way for such a pattern: more than one encoding can
+ * denote a given value, the parsers emit only the canonical one, so
+ * re-parsing the rendered text yields bits that differ from the original.
+ *
+ * Non-canonical patterns do not arise from `bid128Parse`, `dpd128Parse`
+ * or any other normal use of the codec; they appear only when encodings
+ * come from external sources such as network or file data.
  *
  * ## Thread safety
  *
- * This object is stateless and all methods are safe for concurrent use.
+ * All four functions are pure and safe for concurrent use.
  *
  * ## License
  *
@@ -303,351 +304,48 @@ object Decimal128TextCodec {
     /**
      * Decode a BID128 bit pattern to its decimal string form.
      *
-     * Dispatches to specialized renderers based on the encoding's class:
-     * Infinity, NaN (quiet or signaling, with optional payload), zero
-     * (canonical or non-canonical), or finite non-zero. Field extraction
-     * follows IEEE 754-2019 §3.5.2.
+     * Renders through [decodeBid128toBytes] into a scratch buffer and wraps
+     * the bytes it wrote. Field extraction, class dispatch and every leaf
+     * renderer live there; this exists only to hand back a `String`.
      */
     private fun decodeBid128toString(bid128Hi: Long, bid128Lo: Long): String {
-        // IEEE754-2019 Table 3.6-Decimal2 Interchange format parameters -- p 23
-        val k = 128 // storage width in bits
-        // val p = 34 // precision in digits
-        // val emax = 6144
-        val bias = 6176
-        val w5 = 17 // w+5, combination field width in bits
-        val t = 110 // trailing significand field width in bits
-        verify { 1 + w5 + t == k }
-
-        // 1 + 17 + 110 == 128
-        // 1 bit for the sign
-        val sign = bid128Hi < 0L
-        // w5 bit combination field ... for bid128 0x1FFFF
-        val combination = (bid128Hi shr (t - 64)).toInt() and 0x1FFFF
-        val coeffTHi = bid128Hi and ((1L shl t) - 1L)
-
-        val coeffHi: Long
-        val qExp: Int
-        when {
-            // if the top 2 bits are not 0b11
-            combination shr (w5 - 2) != 0b11 -> {
-                //  IEEE754-2019 3.5.2 c) 2) i) -- p 21
-                //   If G0 and G1 together are one of 00, 01, or 10, then the biased
-                //   exponent E is formed from G0 through Gw+1 and the significand
-                //   is formed from bits Gw+2 through the end of the encoding (including T).
-                //
-                // w+5=17 w=12 Gw+1=G13 Gw+2=G14
-                // the top 14 bits of the combination field represent the biased exponent ...
-                val biasedExponentE = combination shr 3
-                qExp = biasedExponentE - bias
-                // ... and the bottom 3 bits are the most significant bits of the significand
-                // coeff/significand is 3 + 110 == 113 ... but that's not all ... see below
-                coeffHi = (combination and 0x07).toLong()
-            }
-
-            combination shr (w5 - 4) != 0b1111 -> {
-                // IEEE754-2019 3.5.2 c) 2) ii) -- p 21
-                //  If G0 and G1 together are 11 and G2 and G3 together are one
-                //  of 00, 01, or 10, then the biased exponent E is formed from
-                //  G2 through Gw+3 and the significand is formed by prefixing
-                //  the 4 bits (8 + Gw+4) to T.
-                //
-                // w+5=17 w=12 Gw+3=G15 Gw+4=G16
-                //
-                val biasedExponentE = (combination ushr 1) and ((1 shl (w5 - 5 + 2)) - 1)
-                qExp = biasedExponentE - bias
-                coeffHi = 8L + (combination and 1).toLong()
-            }
-            // if the top 5 bits are 0b11110 then Infinity
-            (combination shr (w5 - 5)) == 0b11110 -> {
-                return infString(sign)
-            }
-            // if the top 5 bits are 0x11111 then NaN
-            (combination shr (w5 - 5)) == 0b11111 -> {
-                // with the next bit determining signaling NaN
-                val payloadHi = coeffTHi
-                val payloadLo = bid128Lo
-                val isSignaling = ((combination shr (w5 - 6)) and 1) != 0
-                return nanString(sign, isSignaling, payloadHi, payloadLo)
-            }
-
-            else -> {
-                // all possible cases were covered above
-                throw IllegalStateException()
-            }
-        }
-        val dw1 = ((coeffHi shl (t - 64)) or coeffTHi)
-        val dw0 = bid128Lo
-        // IEEE754-2019 3.5.2 p21
-        //  If the value exceeds the maximum, the significand c is
-        //  non-canonical and the value used for c is zero.
-        if ((dw1 or dw0) == 0L ||
-            unsignedLT(MAXX_COEFF_34_HI, dw1) ||
-            dw1 == MAXX_COEFF_34_HI && unsignedLT(MAXX_COEFF_34_LO - 1L, dw0)
-        ) {
-            return zerString(sign, qExp)
-        }
-        return fnzString(sign, qExp, dw1, dw0)
+        val ascii = ByteArray(MAX_LEN)
+        val len = decodeBid128toBytes(ascii, bid128Hi, bid128Lo)
+        return ascii.decodeToString(0, len)
     }
 
     /**
-     * Unpack a DPD128 encoding and hand the pieces to the shared renderers.
+     * Decode a DPD128 bit pattern to its decimal string form.
      *
-     * The peer of [decodeBid128toString]: both reduce an encoding to
-     * `(sign, qExp, coefficient)` and then dispatch to the same four
-     * renderers, which have never seen an interchange format.
+     * The peer of [decodeBid128toString], and the same arrangement: all the
+     * work is [decodeDpd128toBytes]; this only wraps the bytes it wrote.
      */
     private fun decodeDpd128toString(dpd128Hi: Long, dpd128Lo: Long): String {
-        val bias = 6176
-        val w = 12  // exponent continuation width
-        val w5 = 17 // combination field width in bits
-        val t = 110 // trailing significand field width in bits
-
-        val sign = dpd128Hi < 0L
-        val combination = (dpd128Hi shr (t - 64)).toInt() and 0x1FFFF
-        // in DPD the low w bits of the biased exponent always sit at the bottom of G
-        val expContinuation = combination and 0x0FFF
-
-        val d0: Long
-        val qExp: Int
-        var isNaN = false
-        var isSignaling = false
-
-        when {
-            // G0G1 is 00, 01 or 10: leading digit 0..7, exponent MSBs in G0G1
-            combination shr (w5 - 2) != 0b11 -> {
-                val expMSB = combination shr (w5 - 2)
-                qExp = ((expMSB shl w) or expContinuation) - bias
-                d0 = ((combination shr w) and 0b111).toLong()
-            }
-
-            // G0G1 is 11 and G2G3 is not 11: leading digit 8..9, exponent MSBs in G2G3
-            combination shr (w5 - 4) != 0b1111 -> {
-                val expMSB = (combination shr (w5 - 4)) and 0b11
-                qExp = ((expMSB shl w) or expContinuation) - bias
-                d0 = 8L + ((combination shr w) and 0b1).toLong()
-            }
-
-            (combination shr (w5 - 5)) == 0b11110 -> {
-                return infString(sign)
-            }
-
-            else -> {
-                verify { (combination shr (w5 - 5)) == 0b11111 }
-                isNaN = true
-                isSignaling = ((combination shr (w5 - 6)) and 1) != 0
-                d0 = 0L
-                qExp = 0
-            }
-        }
-
-        // Rebuild the binary coefficient from the declets. The leading digit
-        // rides along as a sixth declet of the high group: values 0..9 encode
-        // to themselves as a declet, so it decodes back unchanged.
-        val decletsHi = (d0 shl 50) or ((dpd128Hi and 0x3FFFFFFFFFFFL) shl 4) or (dpd128Lo ushr 60)
-        val decletsLo = dpd128Lo and 0x0FFFFFFFFFFFFFFFL // low 60 bits, six declets
-        val binHi = binFromDeclets(decletsHi)
-        val binLo = binFromDeclets(decletsLo)
-
-        val dw1: Long
-        val dw0: Long
-        if (binHi == 0L) {
-            dw1 = 0L
-            dw0 = binLo
-        } else {
-            dw0 = (binHi * TEN_POW_18) + binLo
-            val carry = if (unsignedLT(dw0, binLo)) 1L else 0L
-            dw1 = unsignedMulHi(binHi, TEN_POW_18) + carry
-        }
-
-        if (isNaN)
-            return nanString(sign, isSignaling, dw1, dw0)
-        if ((dw1 or dw0) == 0L)
-            return zerString(sign, qExp)
-        return fnzString(sign, qExp, dw1, dw0)
-    }
-
-    private fun infString(sign: Boolean) =
-        if (sign) "-Infinity" else "Infinity"
-
-    private fun nanString(
-        sign: Boolean, isSignaling: Boolean,
-        payloadHi: Long, payloadLo: Long
-    ): String {
-        val base =
-            if (!isSignaling)
-                if (sign) "-NaN" else "NaN"
-            else
-                if (sign) "-sNaN" else "sNaN"
-        if ((payloadHi or payloadLo) == 0L ||
-            // non canonical IEEE 754-2019 3.5.2 c) 2)
-            unsignedLT(MAX_PAYLOAD_HI, payloadHi) ||
-            payloadHi == MAX_PAYLOAD_HI && unsignedLT(MAX_PAYLOAD_LO, payloadLo)
-        )
-            return base
-        val digitLen = calcDigitLen128(payloadHi, payloadLo)
-        val ascii = ByteArray(base.length + digitLen)
-        for (i in 0..<base.length)
-            ascii[i] = base[i].code.toByte()
-        u128ToAscii(digitLen, payloadHi, payloadLo, ascii, base.length)
-        return ascii.decodeToString()
-    }
-
-    private val ZEROS = arrayOf(
-        "0", "0.0", "0.00", "0.000", "0.0000", "0.00000", "0.000000", "",
-        "-0", "-0.0", "-0.00", "-0.000", "-0.0000", "-0.00000", "-0.000000", "",
-    )
-
-    private fun zerString(sign: Boolean, qExp: Int): String {
-        if (qExp <= 0 && qExp >= -6) {
-            val signBit = if (sign) 1 else 0
-            val index = -qExp + (signBit shl 3)
-            return ZEROS[index and 0x0F]
-        }
-        val base = if (qExp > 0) {
-            if (sign) "-0E+" else "0E+"
-        } else {
-            if (sign) "-0E" else "0E"
-        }
-        return base + qExp.toString()
-    }
-
-    /**
-     * Format a finite non-zero BID128 value, dispatching to one of three
-     * string forms based on the quantum exponent and the value's magnitude:
-     *
-     *  - integer notation when `qExp == 0`
-     *  - fixed-point notation with a decimal point when the value would
-     *    naturally express with at most 6 leading zeros after the point
-     *  - normalized scientific notation otherwise
-     *
-     * The 6-zero threshold matches the IEEE 754-2019 recommendation for
-     * preferring fixed-point form near unity over scientific form.
-     */
-    private fun fnzString(sign: Boolean, qExp: Int, dw1: Long, dw0: Long): String {
-        val digitLen = calcDigitLen128(dw1, dw0)
-        val eExp = qExp + (digitLen - 1)
-        return when {
-            qExp == 0 -> fnzToIntegerString(sign, digitLen, dw1, dw0)
-            qExp <= 0 && eExp >= -6 -> fnzToDecimalPointString(sign, qExp, digitLen, dw1, dw0)
-            else -> fnzToNormalizedScientificString(sign, qExp, digitLen, dw1, dw0)
-        }
-    }
-
-    /**
-     * Format a finite non-zero BID128 value with `qExp == 0` as a plain
-     * integer string (no decimal point, no exponent).
-     *
-     * Fast path: when the value fits in a non-negative `Long`, defers to
-     * `Long.toString`. General path: renders via [u128ToAscii] into a byte
-     * buffer sized exactly to the result.
-     */
-    private fun fnzToIntegerString(sign: Boolean, digitLen: Int, dw1: Long, dw0: Long): String {
-        verify { digitLen > 0 }
-        if (dw1 == 0L && dw0 >= 0L) {
-            return (if (sign) -dw0 else dw0).toString()
-        }
-        val signBit = if (sign) 1 else 0
-        val ascii = ByteArray(signBit + digitLen)
-        ascii[0] = ascii_minus
-        u128ToAscii(digitLen, dw1, dw0, ascii, signBit)
-        return ascii.decodeToString()
-    }
-
-    /**
-     * Format a finite non-zero BID128 value in fixed-point notation, with
-     * an explicit decimal point and the appropriate number of leading
-     * zeros (e.g., `"0.00012345"`).
-     *
-     * Renders the coefficient digits, then shifts the trailing digits
-     * right by one position to insert the decimal point. Leading zeros
-     * are written directly into the buffer before the digit rendering.
-     */
-    private fun fnzToDecimalPointString(
-        sign: Boolean, qExp: Int,
-        digitLen: Int, dw1: Long, dw0: Long
-    ): String {
-        val digitsRightOfDecimal = -qExp
-        val leadingZeroCount = max(1 + digitsRightOfDecimal - digitLen, 0)
-        val signLen = if (sign) 1 else 0
-        val decimalPointLen = 1
-        val totalLen = signLen + leadingZeroCount + decimalPointLen + digitLen
-        val ascii = ByteArray(totalLen)
-        ascii[0] = ascii_minus
-        for (i in signLen..leadingZeroCount) // there is one extra here
-            ascii[i] = ascii_0
-        u128ToAscii(digitLen, dw1, dw0, ascii, signLen + leadingZeroCount)
-        for (i in totalLen - 1 downTo totalLen - digitsRightOfDecimal)
-            ascii[i] = ascii[i - 1]
-        ascii[totalLen - digitsRightOfDecimal - 1] = ascii_dot
-        return ascii.decodeToString()
-    }
-
-    /**
-     * Format a finite non-zero BID128 value in normalized scientific
-     * notation (e.g., `"1.234E+5"`, `"-9.99E-200"`).
-     *
-     * Renders the coefficient digits, inserts a decimal point after the
-     * leading digit (when there's more than one digit), then appends `E`,
-     * the exponent sign, and the absolute exponent value. The sign is
-     * always written: `+` for non-negative exponents, `-` for negative,
-     * per the IEEE 754-2019 / GDAS `to-scientific-string` form.
-     */
-    private fun fnzToNormalizedScientificString(
-        sign: Boolean, qExp: Int,
-        digitLen: Int, dw1: Long, dw0: Long
-    ): String {
-        verify { digitLen > 0 }
-        val eExp = qExp + (digitLen - 1)
-        val eExpAbs = (eExp xor (eExp shr 31)) - (eExp shr 31)
-        val signLen = if (sign) 1 else 0
-        val decimalPointLen = if (digitLen > 1) 1 else 0
-        val expELen = 1
-        val expSignLen = 1
-        val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
-        val expDigitLen = when {
-            eExpAbs >= 1000 -> 4
-            eExpAbs >= 100 -> 3
-            eExpAbs >= 10 -> 2
-            else -> 1
-        }
-        val totalLen = signLen + decimalPointLen + digitLen + expELen + expSignLen + expDigitLen
-        val ascii = ByteArray(totalLen)
-        ascii[0] = ascii_minus
-        u128ToAscii(digitLen, dw1, dw0, ascii, signLen + decimalPointLen)
-        if (decimalPointLen > 0) {
-            ascii[signLen] = ascii[signLen + 1]
-            ascii[signLen + 1] = ascii_dot
-        }
-        val iE = signLen + decimalPointLen + digitLen
-        ascii[iE] = ascii_E
-        ascii[iE + 1] = expSignByte
-        renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), ascii, totalLen)
-        return ascii.decodeToString()
+        val ascii = ByteArray(MAX_LEN)
+        val len = decodeDpd128toBytes(ascii, dpd128Hi, dpd128Lo)
+        return ascii.decodeToString(0, len)
     }
 
     /* ----------------------------------------------------------------------
      * Rendering into the caller's buffer
      *
-     * The peers of the four String renderers above, writing bytes instead of
-     * producing an object. They exist because the String form must allocate --
-     * that is what a String is -- and a caller feeding a stream or a byte
-     * buffer should not have to pay for one.
+     * The only renderers. Both output forms land here: the caller-buffer
+     * functions return what these write, and the String functions wrap it.
      *
-     * The two families are deliberately separate rather than one built on the
-     * other. Routing the String form through these would cost it the interned
-     * constants: "Infinity", a bare NaN and every plain-form zero come back
-     * from the renderers above at zero bytes allocated, and building them from
-     * bytes would give that away. The price of keeping both is that the
-     * dispatchers are written twice; the corpus test pins them together by
-     * asserting the two forms agree on every row of every table, in both
-     * encodings, so they cannot drift unnoticed.
+     * The two once had String-producing peers, so that "Infinity", a bare
+     * NaN and every plain-form zero could come back as interned constants at
+     * zero bytes allocated. That cost a second copy of the field extraction
+     * and the class dispatch in each encoding -- the same forty lines written
+     * twice, kept in step only by the corpus running both forms past the same
+     * expected text.
+     * One renderer per encoding is worth more than the constants; a String
+     * result now always allocates a MAX_LEN scratch buffer and a String.
      *
      * None of the optional leading characters live in the string data. The
      * sign, and the 's' that marks a signaling NaN, are each written
      * unconditionally and then overwritten by whatever follows when they are
-     * not wanted -- the trick fnzToIntegerString already uses for the sign.
-     * The one exception is a TRAILING '+' in the exponent-form zero, noted
-     * where it happens.
+     * not wanted. The one exception is a TRAILING '+' in the exponent-form
+     * zero, noted where it happens.
      * -------------------------------------------------------------------- */
 
     private const val ascii_s: Byte = 0x73
