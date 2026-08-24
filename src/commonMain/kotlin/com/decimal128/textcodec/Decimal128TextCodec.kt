@@ -1274,18 +1274,6 @@ object Decimal128TextCodec {
     }
 
     /**
-     * Pack the sign, biased quantum exponent, and 113-bit coefficient into
-     * the BID128 encoding stored in [out].
-     *
-     * Always uses the short-form encoding (combination field top bits not
-     * `11`), which is correct for any canonical coefficient whose top 3
-     * bits fit in 0..7.
-     *
-     * Preconditions are checked via [verify] and active under compile-time
-     * control: the exponent must be in [-6176, 6111] and the coefficient
-     * must have at most 34 decimal digits.
-     */
-    /**
      * Pack a finite value into whichever interchange format the caller asked
      * for. BID and DPD are peers: both carry the same sign, the same 14-bit
      * biased exponent and the same 34-digit coefficient, and differ only in
@@ -1342,6 +1330,18 @@ object Decimal128TextCodec {
         out[1] = (declets5Hi shl 60) or declets6Lo
     }
 
+    /**
+     * Pack the sign, biased quantum exponent, and 113-bit coefficient into
+     * the BID128 encoding stored in [out].
+     *
+     * Always uses the short-form encoding (combination field top bits not
+     * `11`), which is correct for any canonical coefficient whose top 3
+     * bits fit in 0..7.
+     *
+     * Preconditions are checked via [verify] and active under compile-time
+     * control: the exponent must be in [-6176, 6111] and the coefficient
+     * must have at most 34 decimal digits.
+     */
     private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         verify { qExp >= -6176 && qExp <= 6111 }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
@@ -1551,9 +1551,6 @@ object Decimal128TextCodec {
     // table becomes per-element initialisation bytecode -- and it allocates
     // nothing at runtime, behaves identically on every Kotlin target, and
     // transcribes unchanged into the sibling ports.
-    //
-    // Both are `internal` rather than `private` so the tests can reach them;
-    // `internal` is module-scoped, so this does not widen the published API.
 
     private const val TEN_POW_15 = 1_000_000_000_000_000L
     private const val TEN_POW_18 = 1_000_000_000_000_000_000L
