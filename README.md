@@ -56,17 +56,16 @@ git submodule update --init --recursive
 ./gradlew jvmTest macosArm64Test jsNodeTest
 ```
 
-Three test classes in two files, plus the corpus reader and the one KMP seam.
+Three test classes in two files, plus the one KMP seam.
 The canonical table is its own class but shares a file with the other tables, so
 the two table runners they both use stay private to it — the same layout the C
 and Swift ports use.
 
 | file | what it covers |
 |---|---|
-| `commonTest/.../TestCorpusVectors.kt` | `TestCorpusVectors` — the four conformance tables over the shared corpus, 2,552 rows, both directions, both formats |
+| `commonTest/.../TestCorpusVectors.kt` | `TestCorpusVectors` — the four conformance tables over the shared corpus, 2,601 rows, both directions, both formats. Also holds the corpus reader and the hex helpers, its only consumer. |
 | | `TestCanonicalCorpus` — the full 84,783-row canonical table |
 | `commonTest/.../TestDpdDeclet.kt` | the declet codec, exhaustively over all 1024 patterns |
-| `commonTest/.../CorpusSupport.kt` | the corpus reader, the hex helpers, and the parse wrappers |
 | `commonTest/.../XPlatformLoadTestResource.kt` | the `expect` loader, with actuals under `jvmTest`, `nativeTest` and `jsTest` |
 
 That is the whole suite, and the shape is deliberate: **every conformance vector
