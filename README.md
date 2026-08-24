@@ -56,16 +56,16 @@ git submodule update --init --recursive
 ./gradlew jvmTest macosArm64Test jsNodeTest
 ```
 
-Two test classes in one file, plus the one KMP seam.
+Two test classes in one file, plus the `actual`s for the one KMP seam.
 The canonical table is its own class but shares a file with the other tables, so
-the two table runners they both use stay private to it — the same layout the C
-and Swift ports use.
+the two table runners they both use stay private to it — the same layout the C,
+Swift, Java and C# ports use.
 
 | file | what it covers |
 |---|---|
-| `commonTest/.../TestCorpusVectors.kt` | `TestCorpusVectors` — the four conformance tables over the shared corpus, 2,601 rows, both directions, both formats. Also holds the corpus reader and the hex helpers, its only consumer. |
+| `commonTest/.../TestCorpusVectors.kt` | `TestCorpusVectors` — the four conformance tables over the shared corpus, 2,601 rows, both directions, both formats. Also holds the corpus reader, the hex helpers and the `expect` loader, all of which it is the only consumer of. |
 | | `TestCanonicalCorpus` — the full 84,783-row canonical table |
-| `commonTest/.../XPlatformLoadTestResource.kt` | the `expect` loader, with actuals under `jvmTest`, `nativeTest` and `jsTest` |
+| `{jvm,native,js}Test/.../XPlatformLoadTestResource*.kt` | the loader's three `actual`s — `java.io.File`, POSIX `fopen`/`fread`, and Node `fs`. Three APIs in three source sets, which is the whole reason `expect`/`actual` exists; they are the only test files this port has that the others do not. |
 
 That is the whole suite, and the shape is deliberate: **every test vector in this
 repo comes from the shared corpus.** There is no hand-written table left, and

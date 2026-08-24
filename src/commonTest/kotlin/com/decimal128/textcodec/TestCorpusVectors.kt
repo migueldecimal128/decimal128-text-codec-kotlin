@@ -187,6 +187,31 @@ fun hex(a: Long, b: Long): String =
     a.toULong().toString(16).padStart(16, '0').uppercase() +
         b.toULong().toString(16).padStart(16, '0').uppercase()
 
+// The one KMP seam in this repo's tests, and the reason it lives here rather
+// than in a file of its own: `expect` and its only caller are both `commonTest`,
+// so the declaration sits with the reader that uses it, the way the C, Swift,
+// Java and C# ports keep their loaders with theirs. Only the `actual`s need
+// files of their own -- one per platform family, because they are three
+// different APIs in three different source sets.
+//
+// The conformance corpus lives in decimal128-resources, mounted as a submodule at
+// <repo>/resources -- the same mount every decimal128 port uses. commonTest has
+// no portable file access, so reaching it needs an actual per platform family:
+// the JVM and native read the filesystem directly, Node reads it through `fs`.
+// Each one resolves an absolute base from the DECIMAL128_RESOURCES environment
+// variable, which the build sets on every test task; the desktop actuals also
+// accept the relative path a Gradle test task's working directory gives them.
+//
+// fileName is corpus-root-relative with a leading '/', e.g.
+// "/text_bid_dpd/text_bid128_dpd128_100.csv.txt". Returns null when the file is
+// not there, which for this repo means the submodule is not checked out.
+expect fun loadTestResourceAsString(fileName: String): String?
+
+/** Where the loader looked, for an error message that names the fix. */
+const val RESOURCES_HINT: String =
+    "the decimal128-resources submodule is not checked out: " +
+        "run `git submodule update --init --recursive`"
+
 /**
  * The shared conformance corpus, read from `resources/text_bid_dpd` -- the
  * `decimal128-resources` submodule, mounted at the repo root the way every
