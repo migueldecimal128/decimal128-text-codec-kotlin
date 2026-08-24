@@ -141,6 +141,60 @@ object Decimal128TextCodec {
     }
 
     /**
+     * The exact bound on a rendered decimal128, in bytes.
+     *
+     * The widest scientific form `-9.999...E-6143` is 1 sign, 1 digit, 1 radix
+     * point, 33 digits, 1 `E`, 1 sign and 4 exponent digits; the widest plain
+     * form `-0.000000999...` is 1 sign, 1 zero, 1 radix point, 6 leading zeros
+     * and 34 digits. Both reach exactly 42.
+     *
+     * A buffer passed to [bid128ToString] must be at least this long. The same
+     * number, and the same meaning, as `MAX_LEN` in the Rust port, `MaxLen` in
+     * Go and `max_len` in Zig; the C port's `D128TEXT_MAX_LEN` is one larger
+     * because it writes a NUL and these do not.
+     */
+    const val MAX_LEN = 42
+
+    /**
+     * Render a BID128 value into a caller-supplied buffer, allocating nothing.
+     *
+     * Writes the ASCII text into [out] starting at index 0 and returns its
+     * length; the text is `out[0]` through `out[n - 1]`. No terminator is
+     * written. The text is identical to what [bid128ToString] returns, and this
+     * form is the one to reach for when the destination is bytes -- a stream, a
+     * socket, a CSV or JSON writer -- because it leaves nothing for the
+     * collector.
+     *
+     * This cannot fail for a correctly sized buffer. [out] must be at least
+     * [MAX_LEN] long; a shorter one throws [IndexOutOfBoundsException] on the
+     * first write past its end rather than corrupting anything, so an
+     * undersized buffer is a caller bug that surfaces immediately.
+     *
+     * @param out the destination, at least [MAX_LEN] bytes
+     * @param bid128Hi high 64 bits of the BID128 encoding
+     * @param bid128Lo low 64 bits of the BID128 encoding
+     * @return the number of bytes written
+     */
+    fun bid128ToString(out: ByteArray, bid128Hi: Long, bid128Lo: Long): Int {
+        return decodeBid128toBytes(out, bid128Hi, bid128Lo)
+    }
+
+    /**
+     * Render a DPD128 value into a caller-supplied buffer, allocating nothing.
+     *
+     * The peer of [bid128ToString], with the same buffer contract and the same
+     * output for peer encodings of a value.
+     *
+     * @param out the destination, at least [MAX_LEN] bytes
+     * @param dpd128Hi high 64 bits of the DPD128 encoding
+     * @param dpd128Lo low 64 bits of the DPD128 encoding
+     * @return the number of bytes written
+     */
+    fun dpd128ToString(out: ByteArray, dpd128Hi: Long, dpd128Lo: Long): Int {
+        return decodeDpd128toBytes(out, dpd128Hi, dpd128Lo)
+    }
+
+    /**
      * Parse a decimal string into a BID128 value, writing the result into
      * [out].
      *
@@ -569,6 +623,348 @@ object Decimal128TextCodec {
         ascii[iE + 1] = expSignByte
         renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), ascii, totalLen)
         return ascii.decodeToString()
+    }
+
+    /* ----------------------------------------------------------------------
+     * Rendering into the caller's buffer
+     *
+     * The peers of the four String renderers above, writing bytes instead of
+     * producing an object. They exist because the String form must allocate --
+     * that is what a String is -- and a caller feeding a stream or a byte
+     * buffer should not have to pay for one.
+     *
+     * The two families are deliberately separate rather than one built on the
+     * other. Routing the String form through these would cost it the interned
+     * constants: "Infinity", a bare NaN and every plain-form zero come back
+     * from the renderers above at zero bytes allocated, and building them from
+     * bytes would give that away. The price of keeping both is that the
+     * dispatchers are written twice; the corpus test pins them together by
+     * asserting the two forms agree on every row of every table, in both
+     * encodings, so they cannot drift unnoticed.
+     *
+     * None of the optional leading characters live in the string data. The
+     * sign, and the 's' that marks a signaling NaN, are each written
+     * unconditionally and then overwritten by whatever follows when they are
+     * not wanted -- the trick fnzToIntegerString already uses for the sign.
+     * The one exception is a TRAILING '+' in the exponent-form zero, noted
+     * where it happens.
+     * -------------------------------------------------------------------- */
+
+    private const val ascii_s: Byte = 0x73
+
+    /**
+     * The peer of [decodeBid128toString], writing into the caller's buffer.
+     * Identical field extraction; only the four leaf calls differ.
+     */
+    private fun decodeBid128toBytes(out: ByteArray, bid128Hi: Long, bid128Lo: Long): Int {
+        // IEEE754-2019 Table 3.6-Decimal2 Interchange format parameters -- p 23
+        val k = 128 // storage width in bits
+        // val p = 34 // precision in digits
+        // val emax = 6144
+        val bias = 6176
+        val w5 = 17 // w+5, combination field width in bits
+        val t = 110 // trailing significand field width in bits
+        verify { 1 + w5 + t == k }
+
+        // 1 + 17 + 110 == 128
+        // 1 bit for the sign
+        val sign = bid128Hi < 0L
+        // w5 bit combination field ... for bid128 0x1FFFF
+        val combination = (bid128Hi shr (t - 64)).toInt() and 0x1FFFF
+        val coeffTHi = bid128Hi and ((1L shl t) - 1L)
+
+        val coeffHi: Long
+        val qExp: Int
+        when {
+            // if the top 2 bits are not 0b11
+            combination shr (w5 - 2) != 0b11 -> {
+                //  IEEE754-2019 3.5.2 c) 2) i) -- p 21
+                //   If G0 and G1 together are one of 00, 01, or 10, then the biased
+                //   exponent E is formed from G0 through Gw+1 and the significand
+                //   is formed from bits Gw+2 through the end of the encoding (including T).
+                //
+                // w+5=17 w=12 Gw+1=G13 Gw+2=G14
+                // the top 14 bits of the combination field represent the biased exponent ...
+                val biasedExponentE = combination shr 3
+                qExp = biasedExponentE - bias
+                // ... and the bottom 3 bits are the most significant bits of the significand
+                // coeff/significand is 3 + 110 == 113 ... but that's not all ... see below
+                coeffHi = (combination and 0x07).toLong()
+            }
+
+            combination shr (w5 - 4) != 0b1111 -> {
+                // IEEE754-2019 3.5.2 c) 2) ii) -- p 21
+                //  If G0 and G1 together are 11 and G2 and G3 together are one
+                //  of 00, 01, or 10, then the biased exponent E is formed from
+                //  G2 through Gw+3 and the significand is formed by prefixing
+                //  the 4 bits (8 + Gw+4) to T.
+                //
+                // w+5=17 w=12 Gw+3=G15 Gw+4=G16
+                //
+                val biasedExponentE = (combination ushr 1) and ((1 shl (w5 - 5 + 2)) - 1)
+                qExp = biasedExponentE - bias
+                coeffHi = 8L + (combination and 1).toLong()
+            }
+            // if the top 5 bits are 0b11110 then Infinity
+            (combination shr (w5 - 5)) == 0b11110 -> {
+                return infBytes(out, sign)
+            }
+            // if the top 5 bits are 0x11111 then NaN
+            (combination shr (w5 - 5)) == 0b11111 -> {
+                // with the next bit determining signaling NaN
+                val payloadHi = coeffTHi
+                val payloadLo = bid128Lo
+                val isSignaling = ((combination shr (w5 - 6)) and 1) != 0
+                return nanBytes(out, sign, isSignaling, payloadHi, payloadLo)
+            }
+
+            else -> {
+                // all possible cases were covered above
+                throw IllegalStateException()
+            }
+        }
+        val dw1 = ((coeffHi shl (t - 64)) or coeffTHi)
+        val dw0 = bid128Lo
+        // IEEE754-2019 3.5.2 p21
+        //  If the value exceeds the maximum, the significand c is
+        //  non-canonical and the value used for c is zero.
+        if ((dw1 or dw0) == 0L ||
+            unsignedLT(MAXX_COEFF_34_HI, dw1) ||
+            dw1 == MAXX_COEFF_34_HI && unsignedLT(MAXX_COEFF_34_LO - 1L, dw0)
+        ) {
+            return zerBytes(out, sign, qExp)
+        }
+        return fnzBytes(out, sign, qExp, dw1, dw0)
+    }
+
+    /**
+     * The peer of [decodeDpd128toString], writing into the caller's buffer.
+     * Identical field extraction; only the four leaf calls differ.
+     */
+    private fun decodeDpd128toBytes(out: ByteArray, dpd128Hi: Long, dpd128Lo: Long): Int {
+        val bias = 6176
+        val w = 12  // exponent continuation width
+        val w5 = 17 // combination field width in bits
+        val t = 110 // trailing significand field width in bits
+
+        val sign = dpd128Hi < 0L
+        val combination = (dpd128Hi shr (t - 64)).toInt() and 0x1FFFF
+        // in DPD the low w bits of the biased exponent always sit at the bottom of G
+        val expContinuation = combination and 0x0FFF
+
+        val d0: Long
+        val qExp: Int
+        var isNaN = false
+        var isSignaling = false
+
+        when {
+            // G0G1 is 00, 01 or 10: leading digit 0..7, exponent MSBs in G0G1
+            combination shr (w5 - 2) != 0b11 -> {
+                val expMSB = combination shr (w5 - 2)
+                qExp = ((expMSB shl w) or expContinuation) - bias
+                d0 = ((combination shr w) and 0b111).toLong()
+            }
+
+            // G0G1 is 11 and G2G3 is not 11: leading digit 8..9, exponent MSBs in G2G3
+            combination shr (w5 - 4) != 0b1111 -> {
+                val expMSB = (combination shr (w5 - 4)) and 0b11
+                qExp = ((expMSB shl w) or expContinuation) - bias
+                d0 = 8L + ((combination shr w) and 0b1).toLong()
+            }
+
+            (combination shr (w5 - 5)) == 0b11110 -> {
+                return infBytes(out, sign)
+            }
+
+            else -> {
+                verify { (combination shr (w5 - 5)) == 0b11111 }
+                isNaN = true
+                isSignaling = ((combination shr (w5 - 6)) and 1) != 0
+                d0 = 0L
+                qExp = 0
+            }
+        }
+
+        // Rebuild the binary coefficient from the declets. The leading digit
+        // rides along as a sixth declet of the high group: values 0..9 encode
+        // to themselves as a declet, so it decodes back unchanged.
+        val decletsHi = (d0 shl 50) or ((dpd128Hi and 0x3FFFFFFFFFFFL) shl 4) or (dpd128Lo ushr 60)
+        val decletsLo = dpd128Lo and 0x0FFFFFFFFFFFFFFFL // low 60 bits, six declets
+        val binHi = binFromDeclets(decletsHi)
+        val binLo = binFromDeclets(decletsLo)
+
+        val dw1: Long
+        val dw0: Long
+        if (binHi == 0L) {
+            dw1 = 0L
+            dw0 = binLo
+        } else {
+            dw0 = (binHi * TEN_POW_18) + binLo
+            val carry = if (unsignedLT(dw0, binLo)) 1L else 0L
+            dw1 = unsignedMulHi(binHi, TEN_POW_18) + carry
+        }
+
+        if (isNaN)
+            return nanBytes(out, sign, isSignaling, dw1, dw0)
+        if ((dw1 or dw0) == 0L)
+            return zerBytes(out, sign, qExp)
+        return fnzBytes(out, sign, qExp, dw1, dw0)
+    }
+
+
+    private val INFINITY_TEXT = "Infinity".encodeToByteArray()
+    private val NAN_TEXT = "NaN".encodeToByteArray()
+    private val ZERO_EXP_TEXT = "0E".encodeToByteArray()
+
+    /**
+     * Every plain-form zero is a prefix of this literal. `k = -qExp` is the
+     * count of zeros after the radix point, so `k == 0` renders `"0"` with no
+     * radix point at all and `k >= 1` renders `"0."` followed by `k` zeros --
+     * lengths 1 and `k + 2`.
+     */
+    private val PLAIN_ZERO = "0.000000".encodeToByteArray()
+
+    private fun infBytes(out: ByteArray, sign: Boolean): Int {
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the 'I' when unsigned
+        INFINITY_TEXT.copyInto(out, signLen)
+        return signLen + INFINITY_TEXT.size
+    }
+
+    private fun nanBytes(
+        out: ByteArray, sign: Boolean, isSignaling: Boolean,
+        payloadHi: Long, payloadLo: Long
+    ): Int {
+        val signLen = if (sign) 1 else 0
+        val sLen = if (isSignaling) 1 else 0
+        val wordOff = signLen + sLen
+        val baseLen = wordOff + NAN_TEXT.size
+        out[0] = ascii_minus   // overwritten by the 's' or the 'N' when unsigned
+        out[signLen] = ascii_s // overwritten by the 'N' when quiet
+        NAN_TEXT.copyInto(out, wordOff)
+        if ((payloadHi or payloadLo) == 0L ||
+            // non canonical IEEE 754-2019 3.5.2 c) 2)
+            unsignedLT(MAX_PAYLOAD_HI, payloadHi) ||
+            payloadHi == MAX_PAYLOAD_HI && unsignedLT(MAX_PAYLOAD_LO, payloadLo)
+        )
+            return baseLen
+        val digitLen = calcDigitLen128(payloadHi, payloadLo)
+        u128ToAscii(digitLen, payloadHi, payloadLo, out, baseLen)
+        return baseLen + digitLen
+    }
+
+    private fun zerBytes(out: ByteArray, sign: Boolean, qExp: Int): Int {
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the '0' when unsigned
+        if (qExp <= 0 && qExp >= -6) {
+            val k = -qExp
+            val zeroLen = if (k == 0) 1 else k + 2
+            PLAIN_ZERO.copyInto(out, signLen, 0, zeroLen)
+            return signLen + zeroLen
+        }
+        // A positive exponent needs an explicit '+'; a negative one prints its
+        // own '-' from appendIntBytes. Write the '+' unconditionally and let
+        // appendIntBytes land on top of it when qExp < 0 -- the same discipline
+        // as the leading sign, pointed the other way. It is correct only
+        // because appendIntBytes emits a '-' for a negative value and emits
+        // nothing for a positive one, and because the plain form above has
+        // already taken every qExp in [-6, 0], so this branch never sees zero.
+        val plusLen = if (qExp > 0) 1 else 0
+        val baseLen = signLen + ZERO_EXP_TEXT.size + plusLen
+        ZERO_EXP_TEXT.copyInto(out, signLen)
+        out[signLen + ZERO_EXP_TEXT.size] = ascii_plus // overwritten by the '-' when qExp < 0
+        return baseLen + appendIntBytes(out, baseLen, qExp)
+    }
+
+    /**
+     * Write a signed decimal exponent at [off], returning its length. The
+     * magnitude never exceeds 6176, so it is at most four digits.
+     */
+    private fun appendIntBytes(out: ByteArray, off: Int, v: Int): Int {
+        var signLen = 0
+        var magnitude = v
+        if (v < 0) {
+            out[off] = ascii_minus
+            signLen = 1
+            magnitude = -v
+        }
+        val digitLen = when {
+            magnitude >= 1000 -> 4
+            magnitude >= 100 -> 3
+            magnitude >= 10 -> 2
+            else -> 1
+        }
+        renderTailDigitsBeforeIndex(digitLen, magnitude.toLong(), out, off + signLen + digitLen)
+        return signLen + digitLen
+    }
+
+    private fun fnzBytes(out: ByteArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long): Int {
+        val digitLen = calcDigitLen128(dw1, dw0)
+        val eExp = qExp + (digitLen - 1)
+        if (qExp == 0)
+            return fnzToIntegerBytes(out, sign, digitLen, dw1, dw0)
+        if (qExp <= 0 && eExp >= -6)
+            return fnzToDecimalPointBytes(out, sign, qExp, digitLen, dw1, dw0)
+        return fnzToNormalizedScientificBytes(out, sign, qExp, digitLen, dw1, dw0)
+    }
+
+    private fun fnzToIntegerBytes(out: ByteArray, sign: Boolean, digitLen: Int, dw1: Long, dw0: Long): Int {
+        verify { digitLen > 0 }
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the first digit when unsigned
+        u128ToAscii(digitLen, dw1, dw0, out, signLen)
+        return signLen + digitLen
+    }
+
+    private fun fnzToDecimalPointBytes(
+        out: ByteArray, sign: Boolean, qExp: Int,
+        digitLen: Int, dw1: Long, dw0: Long
+    ): Int {
+        val digitsRightOfDecimal = -qExp
+        val leadingZeroCount = max(1 + digitsRightOfDecimal - digitLen, 0)
+        val signLen = if (sign) 1 else 0
+        val decimalPointLen = 1
+        val totalLen = signLen + leadingZeroCount + decimalPointLen + digitLen
+        out[0] = ascii_minus
+        for (i in signLen..leadingZeroCount) // there is one extra here
+            out[i] = ascii_0
+        u128ToAscii(digitLen, dw1, dw0, out, signLen + leadingZeroCount)
+        for (i in totalLen - 1 downTo totalLen - digitsRightOfDecimal)
+            out[i] = out[i - 1]
+        out[totalLen - digitsRightOfDecimal - 1] = ascii_dot
+        return totalLen
+    }
+
+    private fun fnzToNormalizedScientificBytes(
+        out: ByteArray, sign: Boolean, qExp: Int,
+        digitLen: Int, dw1: Long, dw0: Long
+    ): Int {
+        verify { digitLen > 0 }
+        val eExp = qExp + (digitLen - 1)
+        val eExpAbs = (eExp xor (eExp shr 31)) - (eExp shr 31)
+        val signLen = if (sign) 1 else 0
+        val decimalPointLen = if (digitLen > 1) 1 else 0
+        val expELen = 1
+        val expSignLen = 1
+        val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
+        val expDigitLen = when {
+            eExpAbs >= 1000 -> 4
+            eExpAbs >= 100 -> 3
+            eExpAbs >= 10 -> 2
+            else -> 1
+        }
+        val totalLen = signLen + decimalPointLen + digitLen + expELen + expSignLen + expDigitLen
+        out[0] = ascii_minus
+        u128ToAscii(digitLen, dw1, dw0, out, signLen + decimalPointLen)
+        if (decimalPointLen > 0) {
+            out[signLen] = out[signLen + 1]
+            out[signLen + 1] = ascii_dot
+        }
+        val iE = signLen + decimalPointLen + digitLen
+        out[iE] = ascii_E
+        out[iE + 1] = expSignByte
+        renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), out, totalLen)
+        return totalLen
     }
 
     // ------- render an integer -------------------------------------------

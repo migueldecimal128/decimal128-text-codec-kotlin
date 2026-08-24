@@ -118,11 +118,18 @@ class TestCorpusVectors {
  * therefore to each other.
  */
 private fun runDecodeTable(rows: List<CorpusRow>, label: String) {
+    val buf = ByteArray(Decimal128TextCodec.MAX_LEN)
     for (row in rows) {
         assertEquals(row.text, Decimal128TextCodec.bid128ToString(row.bidHi, row.bidLo),
             label + " line " + row.lineNumber + ": bid #" + row.bidHex)
         assertEquals(row.text, Decimal128TextCodec.dpd128ToString(row.dpdHi, row.dpdLo),
             label + " line " + row.lineNumber + ": dpd #" + row.dpdHex)
+        val bidLen = Decimal128TextCodec.bid128ToString(buf, row.bidHi, row.bidLo)
+        assertEquals(row.text, buf.decodeToString(0, bidLen),
+            label + " line " + row.lineNumber + ": bid into buffer #" + row.bidHex)
+        val dpdLen = Decimal128TextCodec.dpd128ToString(buf, row.dpdHi, row.dpdLo)
+        assertEquals(row.text, buf.decodeToString(0, dpdLen),
+            label + " line " + row.lineNumber + ": dpd into buffer #" + row.dpdHex)
     }
 }
 
