@@ -19,8 +19,8 @@ import kotlin.test.assertTrue
  *
  *   T1 DECODE  bid -> text and dpd -> text          (100, noncanonical)
  *   T2 ENCODE  text -> bid and text -> dpd          (100)
- *   T3 PARSE   input text -> bits, both formats     (parse, 1,052 rows)
- *   T4 ERROR   malformed input text -> rejection    (error, 133 rows)
+ *   T3 PARSE   input text -> bits, both formats     (parse, 1,061 rows)
+ *   T4 ERROR   malformed input text -> rejection    (error, 173 rows)
  *
  * Plus the cross-format assertion: for every row both encodings must render to
  * the same text. That is the strongest property the corpus encodes.
@@ -62,7 +62,7 @@ class TestCorpusVectors {
     @Test
     fun parseVectorsProduceBothEncodings() {
         val rows = Corpus.load(Corpus.PARSE)
-        assertEquals(1052, rows.size)
+        assertEquals(1061, rows.size)
         for (row in rows) {
             val b = bidParse(row.text)
             assertNull(b.error, "parse line " + row.lineNumber + ": bid rejected <" + row.text + ">")
@@ -82,7 +82,7 @@ class TestCorpusVectors {
     @Test
     fun errorVectorsAreRejectedByBothFormats() {
         val rows = Corpus.load(Corpus.ERROR)
-        assertEquals(133, rows.size)
+        assertEquals(173, rows.size)
         for (row in rows) {
             val b = bidParse(row.text)
             val d = dpdParse(row.text)

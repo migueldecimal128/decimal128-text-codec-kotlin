@@ -56,7 +56,7 @@ git submodule update --init --recursive
 ./gradlew jvmTest macosArm64Test jsNodeTest
 ```
 
-Four test classes in three files, plus the corpus reader and the one KMP seam.
+Three test classes in two files, plus the corpus reader and the one KMP seam.
 The canonical table is its own class but shares a file with the other tables, so
 the two table runners they both use stay private to it — the same layout the C
 and Swift ports use.
@@ -65,17 +65,14 @@ and Swift ports use.
 |---|---|
 | `commonTest/.../TestCorpusVectors.kt` | `TestCorpusVectors` — the four conformance tables over the shared corpus, 2,552 rows, both directions, both formats |
 | | `TestCanonicalCorpus` — the full 84,783-row canonical table |
-| `commonTest/.../TestBid128Parse.kt` | hand-chosen BID parse vectors, including the parenthesised-NaN payloads the corpus cannot carry |
 | `commonTest/.../TestDpdDeclet.kt` | the declet codec, exhaustively over all 1024 patterns |
 | `commonTest/.../CorpusSupport.kt` | the corpus reader, the hex helpers, and the parse wrappers |
 | `commonTest/.../XPlatformLoadTestResource.kt` | the `expect` loader, with actuals under `jvmTest`, `nativeTest` and `jsTest` |
 
 That is the whole suite, and the shape is deliberate: **every conformance vector
-comes from the shared corpus.** `TestBid128Parse` survives only because seven of
-its vectors are parenthesised-NaN payloads, which the decimal128-c engine rejects
-and so cannot author; when that divergence is resolved upstream those become
-corpus rows and the file goes. `TestDpdDeclet` survives because it needs no
-vectors at all -- it enumerates the primitive's entire 1024-value domain, where no
+comes from the shared corpus -- there is no hand-written vector left in this
+repo.** `TestDpdDeclet` is the one test that holds data of its own, and it holds
+none: it enumerates the declet primitive's entire 1024-value domain, where no
 oracle exists or is required.
 
 The repo is standalone: it depends on no decimal128 port, at runtime or in
