@@ -1218,7 +1218,7 @@ object Decimal128TextCodec {
         // -- it is removed and the invariant is enforced.
         //
         // Measured on the C port, which is a translation of this file: zero
-        // executions across the 86,126-row shared corpus, 400,000 random
+        // executions across the 87k-row shared corpus, 400,000 random
         // numerals, and 76,280 finalize calls driven by inputs of up to 5,000
         // digits, where the widest coefficient ever seen here was 34.
         //
