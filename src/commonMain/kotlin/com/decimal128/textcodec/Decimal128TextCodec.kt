@@ -1716,6 +1716,8 @@ object Decimal128TextCodec {
         var multiplier = 1L
         while (rest != 0L) {
             bin += dpdDecodeDeclet(rest and 0x3FFL) * multiplier
+            // The last iteration multiplies past 10^18 and the product is never
+            // used, since rest is zero by then, so the wrap is harmless.
             multiplier *= 1000L
             rest = rest ushr 10
         }
