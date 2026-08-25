@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-package com.decimal128.textcodec
+package com.decimal128.textcodec.tests
+
+import com.decimal128.textcodec.Decimal128TextCodec
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

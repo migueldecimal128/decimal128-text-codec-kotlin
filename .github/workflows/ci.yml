@@ -2,7 +2,8 @@ name: ci
 
 # The codec is one file with no runtime dependencies, so CI exists to cover the
 # targets a developer's host cannot execute rather than to re-run what already
-# passes locally.
+# passes locally -- plus the build with the internal assertions armed, which is
+# the only configuration in which a verify can fail at all.
 #
 # linuxX64 is the reason this file exists: it compiles and links on a macOS host
 # but never runs there, so until now no machine had ever executed it. The Linux
@@ -40,6 +41,8 @@ jobs:
           cache: gradle
       - name: Test
         run: ./gradlew jvmTest jsNodeTest linuxX64Test --console=plain
+      - name: Test (verify armed)
+        run: ./gradlew jvmTest jsNodeTest linuxX64Test -Pverify --console=plain
 
   macos:
     name: macosArm64 + iosSimulatorArm64

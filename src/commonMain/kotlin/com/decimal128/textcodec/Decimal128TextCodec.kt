@@ -79,8 +79,16 @@ import kotlin.math.min
  */
 object Decimal128TextCodec {
 
-    // compile-time flag to control verification of state
-    private const val VERIFY_ENABLED: Boolean = true
+    // Compile-time flag controlling the verify() state assertions. Its value
+    // comes from the generated VerifyFlag.kt, which build.gradle.kts writes
+    // from `-Pverify`; the default is OFF, matching every sibling port
+    // (-DVERIFY_ENABLED=1 in C, -tags verify in Go, --features verify in Rust,
+    // -Dverify in Zig, the Debug configuration in Swift and C#, -ea in Java).
+    // A consumer compiles this module into their own program and must not take
+    // a throw inside a library on data they do not control. Because the flag is
+    // a const, `if (VERIFY_ENABLED)` folds away entirely when it is off and
+    // neither the message nor the predicate survives. CI runs one armed pass
+    // over the whole corpus.
 
     private inline fun verify(block: () -> Boolean) {
         if (VERIFY_ENABLED)
@@ -532,6 +540,9 @@ object Decimal128TextCodec {
      * The only renderers. Both output forms land here: the caller-buffer
      * functions return what these write, and the String functions wrap it.
      *
+     * These leaf renderers know nothing about BID or DPD: both decoders
+     * reduce an encoding to (sign, qExp, coefficient) and hand it here.
+     *
      * The two once had String-producing peers, so that "Infinity", a bare
      * NaN and every plain-form zero could come back as interned constants at
      * zero bytes allocated. That cost a second copy of the field extraction
@@ -903,7 +914,7 @@ object Decimal128TextCodec {
             }
         }
         while (remainingDigitCount > 0) {
-            val divTen = (t * 0xCCCCCCCDL) ushr 35
+            val divTen = (t * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
             val digit = (t - (divTen * 10L)).toInt()
             ascii[--ib] = ('0'.code + digit).toByte()
             t = divTen
@@ -912,11 +923,18 @@ object Decimal128TextCodec {
         verify { offMaxx - ib == renderDigitCount }
     }
 
-    // -- encode bid128 from String --------------------------------------------------------
+    // -- encode from String --------------------------------------------------------
 
     /**
-     * Top-level dispatcher for parsing a decimal character sequence into a
-     * BID128 encoding. Reads optional sign, then dispatches by leading character
+     * The character at [index], or NUL past the end of the string. The
+     * parsers walk a NUL-terminated view of the input, so end-of-input is one
+     * more character value rather than a bound test at every read.
+     */
+    private inline fun String.getOrNul(index: Int): Char = if (index < length) this[index] else '\u0000'
+
+    /**
+     * Top-level dispatcher for parsing a decimal character sequence into an
+     * encoding. Reads optional sign, then dispatches by leading character
      * to the finite-value, infinity, or NaN parser.
      *
      * The leading character is also passed through to the dispatched
@@ -926,8 +944,6 @@ object Decimal128TextCodec {
      * @return `null` on success (with `out` populated), or a
      *         human-readable error string on failure
      */
-    private inline fun String.getOrNul(index: Int): Char = if (index < length) this[index] else '\u0000'
-
     private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
         var pos = 0
         val chFirst = str.getOrNul(pos++)
@@ -949,8 +965,8 @@ object Decimal128TextCodec {
 
     /**
      * Parse the keyword `Infinity` (or its 3-letter abbreviation `Inf`),
-     * case-insensitively, and write the corresponding BID128 encoding into
-     * [out]. Returns an error string for any other input.
+     * case-insensitively, and write the corresponding encoding into [out].
+     * Returns an error string for any other input.
      */
     private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
         var pos = startPos
@@ -1120,7 +1136,7 @@ object Decimal128TextCodec {
     }
 
     /**
-     * Parse a finite decimal numeral and write the corresponding BID128
+     * Parse a finite decimal numeral and write the corresponding
      * encoding into [out]. Accepts an optional decimal point, an
      * optional `E`/`e` exponent (with optional `+`/`-` sign), and any
      * number of significant digits.
@@ -1277,7 +1293,7 @@ object Decimal128TextCodec {
 
     /**
      * Round and finalize a finite parsed coefficient/exponent
-     * pair into the BID128 encoding stored in [out].
+     * pair into the encoding stored in [out].
      *
      * Implements `roundTiesToEven` rounding with full handling of the
      * decimal128 boundary conditions: oversized coefficient, underflow to
@@ -1527,7 +1543,7 @@ object Decimal128TextCodec {
     }
 
     /**
-     * Test whether a coefficient/exponent pair fits as a canonical BID128
+     * Test whether a coefficient/exponent pair fits as a canonical
      * encoding: exponent in [-6176, 6111] and coefficient in [0, 10^34).
      *
      * Fast path uses the leading-zero bit count of the high word to
@@ -1565,7 +1581,7 @@ object Decimal128TextCodec {
         dw0: Long,
         residue: Int
     ) {
-        // IEEE 754 7.5 Underflow - handle subnormal region
+        // IEEE 754-2019 7.5 Underflow -- the subnormal region
         verify { qExp < -6176 }
         val truncationNeeded = -6176 - qExp
         val digitLen = calcDigitLen128(dw1, dw0)
@@ -1669,11 +1685,6 @@ object Decimal128TextCodec {
      */
     private const val DIGIT_MAP = 0b11_11_11_11_10_01_01_01_01_00
 
-    /**
-     * Classify a single discarded decimal digit (0..9) as [EXACT],
-     * [LT_HALF], [HALF], or [GT_HALF] via lookup in [DIGIT_MAP].
-     */
-
     // ---- DPD declet conversion -------------------------------------------
     //
     // A declet is 10 bits holding three decimal digits, 0..999. This is the
@@ -1733,8 +1744,9 @@ object Decimal128TextCodec {
     /**
      * Decode a 10-bit DPD declet (bits 9..0) into `0..999`.
      *
-     * Mapping: bit9..bit0 as `p q r s t u v w x y`. Handles non-canonical
-     * declets as well as canonical ones, per Cowlishaw's dpd2bcd.
+     * Mapping: bit9..bit0 as `p q r s t u v w x y`. Accepts the 24
+     * non-canonical declets as well as the 1000 canonical ones, per
+     * Cowlishaw's dpd2bcd.
      */
     private fun dpdDecodeDeclet(declet: Long): Long {
         verify { declet in 0..1023 }
@@ -1843,6 +1855,10 @@ object Decimal128TextCodec {
                 (x shl 1) or y
     }
 
+    /**
+     * Classify a single discarded decimal digit (0..9) as [EXACT],
+     * [LT_HALF], [HALF], or [GT_HALF] via lookup in [DIGIT_MAP].
+     */
     private fun residueFromDecimalDigit(digit: Int): Int = (DIGIT_MAP shr (digit shl 1)) and 0x03
 
     /**
@@ -1890,7 +1906,14 @@ object Decimal128TextCodec {
     /**
      * Powers of 10 from `10^0` through `10^34` as 128-bit unsigned values
      * in little-endian order: `POW10[2*i]` is the low 64 bits, `POW10[2*i + 1]`
-     * the high 64 bits, of `10^i`. Sized to the BID128 coefficient bound.
+     * the high 64 bits, of `10^i`.
+     *
+     * Sized to the coefficient bound and indexed directly -- no mask, no
+     * padding. Every reachable index is at most 34: the binding case is
+     * [calcDigitLen128], whose input is always a coefficient or NaN payload
+     * below `10^34`, so `bitLen <= 113` and `(bitLen * 1233) ushr 12 <= 34`.
+     * It doubles as the `5^n` source for the divide kernel, since
+     * `10^n ushr n` is exactly `5^n`; there is no POW5 table.
      */
     private val POW10 = longArrayOf(
         // little-endian order
@@ -1935,10 +1958,6 @@ object Decimal128TextCodec {
     /**
      * Compute the bit-length of a 128-bit unsigned value: the position of
      * the highest set bit, plus one. Returns 0 for the zero value.
-     *
-     * Branchless: a mask derived from `dw1`'s zero-or-not status decides
-     * whether `dw0`'s leading-zero count contributes to the result. Avoids
-     * a conditional branch on the path through the function.
      */
     private inline fun calcBitLen128(dw1: Long, dw0: Long): Int {
         return if (dw1 != 0L) 128 - dw1.countLeadingZeroBits()

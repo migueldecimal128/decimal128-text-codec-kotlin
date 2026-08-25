@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package com.decimal128.textcodec
+package com.decimal128.textcodec.tests
 
 import java.io.File
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-package com.decimal128.textcodec
+package com.decimal128.textcodec.tests
 
 // Node actual. The Node runner's working directory is somewhere under build/, so
 // there is no useful relative fallback here: the build hands over an absolute
