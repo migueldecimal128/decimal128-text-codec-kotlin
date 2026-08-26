@@ -68,7 +68,7 @@ import kotlin.math.min
  *
  * All functions are pure and safe for concurrent use.
  *
- * ## In this port
+ * ## This implementation
  *
  * The renderers return a `String`; their `bid128ToAscii` and
  * `dpd128ToAscii` peers write into a caller-owned `ByteArray` and return a
@@ -81,9 +81,7 @@ object Decimal128TextCodec {
 
     // Compile-time flag controlling the verify() state assertions. Its value
     // comes from the generated VerifyFlag.kt, which build.gradle.kts writes
-    // from `-Pverify`; the default is OFF, matching every sibling port
-    // (-DVERIFY_ENABLED=1 in C, -tags verify in Go, --features verify in Rust,
-    // -Dverify in Zig, the Debug configuration in Swift and C#, -ea in Java).
+    // from `-Pverify`; the default is OFF.
     // A consumer compiles this module into their own program and must not take
     // a throw inside a library on data they do not control. Because the flag is
     // a const, `if (VERIFY_ENABLED)` folds away entirely when it is off and
@@ -527,9 +525,9 @@ object Decimal128TextCodec {
     private const val MAX_PAYLOAD_HI = MIN_PRECISION_34_COEFF_HI
     private const val MAX_PAYLOAD_LO = MIN_PRECISION_34_COEFF_LO - 1L
 
-    // The encoding's fixed bit patterns. SIGN_BIT is the sibling ports'
-    // 0x8000000000000000 spelled as Long.MIN_VALUE, which is that pattern in a
-    // signed dword -- the same reason this file carries unsignedMulHi and ushr.
+    // The encoding's fixed bit patterns. SIGN_BIT is 0x8000000000000000
+    // spelled as Long.MIN_VALUE, which is that pattern in a signed dword --
+    // the same reason this file carries unsignedMulHi and ushr.
     private const val SIGN_BIT = Long.MIN_VALUE
     private const val INF_PATTERN_HI = 0x7800000000000000L
     private const val QNAN_PATTERN_HI = 0x7C00000000000000L
@@ -934,11 +932,13 @@ object Decimal128TextCodec {
     // -- encode from String --------------------------------------------------------
 
     /**
-     * The character at [index], or NUL past the end of the string. The
-     * parsers walk a NUL-terminated view of the input, so end-of-input is one
-     * more character value rather than a bound test at every read.
+     * The code of the character at [index], or -1 past the end of the string.
+     * The parsers walk the input as character codes, so end-of-input is one
+     * more code value rather than a bound test at every read. -1 is not a
+     * character, which keeps NUL an ordinary input character -- and an
+     * invalid one -- instead of doubling as the terminator.
      */
-    private inline fun String.getOrNul(index: Int): Char = if (index < length) this[index] else '\u0000'
+    private inline fun codeAt(str: String, index: Int): Int = if (index >= 0 && index < str.length) str[index].code else -1
 
     /**
      * Top-level dispatcher for parsing a decimal character sequence into an
@@ -954,19 +954,19 @@ object Decimal128TextCodec {
      */
     private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
         var pos = 0
-        val chFirst = str.getOrNul(pos++)
+        val chFirst = codeAt(str, pos++)
         var ch = chFirst
-        val sign = ch == '-'
-        if (ch == '+' || ch == '-')
-            ch = str.getOrNul(pos++)
-        if (ch >= '0' && ch <= '9' || ch == '.')
+        val sign = ch == '-'.code
+        if (ch == '+'.code || ch == '-'.code)
+            ch = codeAt(str, pos++)
+        if (ch >= '0'.code && ch <= '9'.code || ch == '.'.code)
             return parseFiniteValueText(out, formatIsBid, sign, ch, str, pos)
-        val chLower = (ch.code or 0x20).toChar()
-        if (chLower == 'i')
+        val chLower = ch or 0x20
+        if (chLower == 'i'.code)
             return parseInfinityText(out, sign, ch, str, pos)
-        if (chLower == 'n' || chLower == 's' || chLower == 'q')
+        if (chLower == 'n'.code || chLower == 's'.code || chLower == 'q'.code)
             return parseNanText(out, formatIsBid, sign, ch, str, pos)
-        if (chFirst == '\u0000')
+        if (chFirst == -1)
             return "empty string"
         return "invalid format"
     }
@@ -976,23 +976,23 @@ object Decimal128TextCodec {
      * case-insensitively, and write the corresponding encoding into [out].
      * Returns an error string for any other input.
      */
-    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
+    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
         var pos = startPos
         var ch = chFirst
         var chPrevCode = 0
         val target = "infinity"
         for (i in 0 until 8) {
             val targetCode = target[i].code
-            if (ch.code or 0x20 != targetCode) {
-                if (ch.code == 0)
+            if (ch or 0x20 != targetCode) {
+                if (ch == -1)
                     break
                 else
                     return "failure parsing infinity"
             }
-            chPrevCode = ch.code or 0x20
-            ch = str.getOrNul(pos++)
+            chPrevCode = ch or 0x20
+            ch = codeAt(str, pos++)
         }
-        if (ch.code != 0 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
+        if (ch != -1 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
             return "failure parsing Infinity"
         out[0] = INF_PATTERN_HI or if (sign) SIGN_BIT else 0L
         out[1] = 0L
@@ -1012,8 +1012,7 @@ object Decimal128TextCodec {
      * `NaN(1`, `NaN(1]` and `NaN()` are all rejected, and `NaN[1]` / `NaN{1}`
      * are not this form at all.
      *
-     * The full decimal128 ports accept the same spelling; the codecs had it
-     * first, and the ports took it on 2026-08-23. The reason it exists at all
+     * The reason this spelling exists at all
      * is that C's own `strtod` reads
      * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
      * platform itself. The resemblance stops at the parentheses -- strtod's
@@ -1025,30 +1024,30 @@ object Decimal128TextCodec {
      * The legacy base skipped `(`, `)`, `[`, `]`, `{` and `}` ANYWHERE, so it
      * read `NaN(1)2(3)` as payload 123. That is not this, and stays rejected.
      */
-    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Char, str: String, startPos: Int): String? {
+    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
         var pos = startPos
         var ch = chFirst
-        val hasS = (ch.code or 0x20) == 's'.code
-        val hasQ = (ch.code or 0x20) == 'q'.code
+        val hasS = (ch or 0x20) == 's'.code
+        val hasQ = (ch or 0x20) == 'q'.code
         if (hasQ or hasS)
-            ch = str.getOrNul(pos++)
-        if (((ch.code or 0x20) != 'n'.code) ||
-            ((str.getOrNul(pos++).code or 0x20) != 'a'.code) ||
-            ((str.getOrNul(pos++).code or 0x20) != 'n'.code)
+            ch = codeAt(str, pos++)
+        if (((ch or 0x20) != 'n'.code) ||
+            ((codeAt(str, pos++) or 0x20) != 'a'.code) ||
+            ((codeAt(str, pos++) or 0x20) != 'n'.code)
         )
             return "failure parsing NaN"
         var payloadDw0 = 0L
         var payloadDw1 = 0L
-        ch = str.getOrNul(pos++)
-        val hasParen = ch == '('
+        ch = codeAt(str, pos++)
+        val hasParen = ch == '('.code
         if (hasParen)
-            ch = str.getOrNul(pos++)
-        if (hasParen || ch.code != 0) {
+            ch = codeAt(str, pos++)
+        if (hasParen || ch != -1) {
             var accumDigitCount = 0
             var accum19a = 0L
             var accum19b = 0L
-            while (ch >= '0' && ch <= '9') {
-                val d = ch - '0'
+            while (ch >= '0'.code && ch <= '9'.code) {
+                val d = ch - '0'.code
                 // Count every digit written, leading zeros included. The
                 // 33-digit limit below is a limit on the payload as spelled,
                 // not on its significant digits, so "NaN" followed by forty
@@ -1060,17 +1059,17 @@ object Decimal128TextCodec {
                     accum19a = (accum19a * 10L) + d.toLong()
                 else
                     accum19b = (accum19b * 10L) + d.toLong()
-                ch = str.getOrNul(pos++)
+                ch = codeAt(str, pos++)
             }
             if (accumDigitCount == 0)
                 return if (hasParen) "failure parsing NaN" else "non-digit NaN payload character"
             if (hasParen) {
                 // the ')' must be present and must end the input
-                if (ch != ')')
-                    return if (ch.code == 0) "failure parsing NaN" else "non-digit NaN payload character"
-                if (str.getOrNul(pos++).code != 0)
+                if (ch != ')'.code)
+                    return if (ch == -1) "failure parsing NaN" else "non-digit NaN payload character"
+                if (codeAt(str, pos++) != -1)
                     return "failure parsing NaN"
-            } else if (ch.code != 0) {
+            } else if (ch != -1) {
                 return "non-digit NaN payload character"
             }
             if (accumDigitCount > 33) {
@@ -1165,7 +1164,7 @@ object Decimal128TextCodec {
         out: LongArray,
         formatIsBid: Boolean,
         sign: Boolean,
-        chFirst: Char,
+        chFirst: Int,
         str: String,
         startPos: Int
     ): String? {
@@ -1181,17 +1180,17 @@ object Decimal128TextCodec {
         var prevWasDigit = false
         var afterUnderscore = false
 
-        verify { chFirst.code != 0 }
+        verify { chFirst != -1 }
         var ch = chFirst
         var fractionalDigitCount = 0
         var accum19a = 0L
         var accum19b = 0L
         var exp = 0
 
-        while (ch in '0'..'9' || ch == '.' || ch == '_') {
+        while (ch in '0'.code..'9'.code || ch == '.'.code || ch == '_'.code) {
             when (ch) {
-                in '0'..'9' -> {
-                    val d = ch - '0'
+                in '0'.code..'9'.code -> {
+                    val d = ch - '0'.code
                     hasCoefficientDigit = true
                     // count while flushing leading zeros
                     significantDigitCount += (-(significantDigitCount or d)) ushr 31
@@ -1210,7 +1209,7 @@ object Decimal128TextCodec {
                     afterUnderscore = false
                 }
 
-                '_' -> when {
+                '_'.code -> when {
                     !prevWasDigit -> return "invalid underscore location"
                     else -> {
                         prevWasDigit = false
@@ -1218,7 +1217,7 @@ object Decimal128TextCodec {
                     }
                 }
 
-                '.' -> when {
+                '.'.code -> when {
                     afterUnderscore -> return "invalid underscore location"
                     hasDot -> return "double radix dot"
                     else -> {
@@ -1227,26 +1226,26 @@ object Decimal128TextCodec {
                     }
                 }
             }
-            ch = str.getOrNul(pos++)
+            ch = codeAt(str, pos++)
         }
         if (afterUnderscore)
             return "invalid underscore location"
         if (!hasCoefficientDigit)
             return "no coefficient digit"
         // this path has at least one digit
-        if (ch == 'E' || ch == 'e') {
-            ch = str.getOrNul(pos++)
-            if (ch == '+' || ch == '-') {
-                expSign = ch == '-'
-                ch = str.getOrNul(pos++)
+        if (ch == 'E'.code || ch == 'e'.code) {
+            ch = codeAt(str, pos++)
+            if (ch == '+'.code || ch == '-'.code) {
+                expSign = ch == '-'.code
+                ch = codeAt(str, pos++)
             }
             var hasExpDigit = false
             var expSignificantDigitCount = 0
             prevWasDigit = false
             afterUnderscore = false
-            while (ch in '0'..'9' || ch == '_') {
+            while (ch in '0'.code..'9'.code || ch == '_'.code) {
                 when (ch) {
-                    '_' -> when {
+                    '_'.code -> when {
                         !prevWasDigit -> return "invalid underscore location"
                         else -> {
                             prevWasDigit = false
@@ -1256,7 +1255,7 @@ object Decimal128TextCodec {
 
                     else -> {
                         hasExpDigit = true
-                        val eDigit = ch - '0'
+                        val eDigit = ch - '0'.code
                         // count while flushing leading zeros
                         expSignificantDigitCount +=
                             (-(expSignificantDigitCount or eDigit)) ushr 31
@@ -1265,7 +1264,7 @@ object Decimal128TextCodec {
                         afterUnderscore = false
                     }
                 }
-                ch = str.getOrNul(pos++)
+                ch = codeAt(str, pos++)
             }
             if (afterUnderscore)
                 return "invalid underscore location"
@@ -1275,7 +1274,7 @@ object Decimal128TextCodec {
             if (expSignificantDigitCount > 4)
                 exp = 9999
         }
-        if (ch.code != 0)
+        if (ch != -1)
             return "unexpected char"
         // we have at least one digit
         var dw0 = accum19a
@@ -1378,7 +1377,7 @@ object Decimal128TextCodec {
         // never once executed -- and therefore has never been verified to work
         // -- it is removed and the invariant is enforced.
         //
-        // Measured on the C port, which is a translation of this file: zero
+        // Measured: zero
         // executions across the 87k-row shared corpus, 400,000 random
         // numerals, and 76,280 finalize calls driven by inputs of up to 5,000
         // digits, where the widest coefficient ever seen here was 34.
@@ -1388,8 +1387,8 @@ object Decimal128TextCodec {
         // out-of-range coefficient silently. It cannot fire on a caller's data
         // -- no input reaches it -- only on a future caller that breaks the
         // invariant, which is exactly when a loud failure is wanted. A caller
-        // that is not a parser needs the truncation step back; it is live in
-        // every full port's Finalize, where multiply and FMA do reach it.
+        // that is not a parser needs the truncation step back, as a multiply
+        // or an FMA would.
         check(calcDigitLen128(dw1In, dw0In) <= 34)
 
         // Step 4: underflow. With no precision truncation to outrank it, the
@@ -1705,8 +1704,7 @@ object Decimal128TextCodec {
     // arithmetic compiles to 2,814 bytes against 16,784 for the equivalent
     // shortArrayOf tables -- the JVM has no array-literal constant, so a
     // table becomes per-element initialisation bytecode -- and it allocates
-    // nothing at runtime, behaves identically on every Kotlin target, and
-    // transcribes unchanged into the sibling ports.
+    // nothing at runtime, and behaves identically on every Kotlin target.
 
     private const val TEN_POW_15 = 1_000_000_000_000_000L
     private const val TEN_POW_18 = 1_000_000_000_000_000_000L
