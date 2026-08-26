@@ -448,7 +448,7 @@ object Decimal128TextCodec {
         require(out.size >= 2) { "out must have size >= 2, was ${out.size}" }
         val errorStr = encodeStringOrError(out, formatIsBid = true, str = str)
         if (errorStr != null) {
-            out[0] = 0x7C00000000000000L
+            out[0] = QNAN_PATTERN_HI
             out[1] = 0x0000000000000000L
         }
         return errorStr
@@ -507,7 +507,7 @@ object Decimal128TextCodec {
         require(out.size >= 2) { "out must have size >= 2, was ${out.size}" }
         val errorStr = encodeStringOrError(out, formatIsBid = false, str = str)
         if (errorStr != null) {
-            out[0] = 0x7C00000000000000L
+            out[0] = QNAN_PATTERN_HI
             out[1] = 0x0000000000000000L
         }
         return errorStr
@@ -526,6 +526,14 @@ object Decimal128TextCodec {
     // 33 nines
     private const val MAX_PAYLOAD_HI = MIN_PRECISION_34_COEFF_HI
     private const val MAX_PAYLOAD_LO = MIN_PRECISION_34_COEFF_LO - 1L
+
+    // The encoding's fixed bit patterns. SIGN_BIT is the sibling ports'
+    // 0x8000000000000000 spelled as Long.MIN_VALUE, which is that pattern in a
+    // signed dword -- the same reason this file carries unsignedMulHi and ushr.
+    private const val SIGN_BIT = Long.MIN_VALUE
+    private const val INF_PATTERN_HI = 0x7800000000000000L
+    private const val QNAN_PATTERN_HI = 0x7C00000000000000L
+    private const val SNAN_PATTERN_HI = 0x7E00000000000000L
 
     private const val ascii_minus: Byte = 0x2D
     private const val ascii_plus: Byte = 0x2B
@@ -986,7 +994,7 @@ object Decimal128TextCodec {
         }
         if (ch.code != 0 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
             return "failure parsing Infinity"
-        out[0] = 0x7800000000000000L or if (sign) Long.MIN_VALUE else 0L
+        out[0] = INF_PATTERN_HI or if (sign) SIGN_BIT else 0L
         out[1] = 0L
         return null
     }
@@ -1105,7 +1113,7 @@ object Decimal128TextCodec {
     private fun bid128SetNaN(out: LongArray, sign: Boolean,
                              isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
         val withoutPayload =
-            (if (isSignaling) 0x7E00000000000000 else 0x7C00000000000000) or (if (sign) Long.MIN_VALUE else 0L)
+            (if (isSignaling) SNAN_PATTERN_HI else QNAN_PATTERN_HI) or (if (sign) SIGN_BIT else 0L)
         out[0] = withoutPayload or payloadDw1
         out[1] = payloadDw0
     }
@@ -1499,7 +1507,7 @@ object Decimal128TextCodec {
         verify { qExp >= -6176 && qExp <= 6111 }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
         val qBiased = qExp + 6176
-        val s = if (sign) Long.MIN_VALUE else 0
+        val s = if (sign) SIGN_BIT else 0L
         val g = qBiased.toLong() shl (3 + 46)
         out[0] = s or g or dw1
         out[1] = dw0
@@ -1509,7 +1517,7 @@ object Decimal128TextCodec {
      * Encode `Infinity` (or `-Infinity`) into [out].
      */
     private fun finalizeOverflow(out: LongArray, sign: Boolean) {
-        out[0] = (if (sign) Long.MIN_VALUE else 0L) or 0x7800000000000000L
+        out[0] = (if (sign) SIGN_BIT else 0L) or INF_PATTERN_HI
         out[1] = 0L
     }
 
