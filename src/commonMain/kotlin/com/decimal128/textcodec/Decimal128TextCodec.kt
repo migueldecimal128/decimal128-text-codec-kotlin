@@ -987,7 +987,7 @@ object Decimal128TextCodec {
                 if (ch == -1)
                     break
                 else
-                    return "failure parsing infinity"
+                    return "failure parsing Infinity"
             }
             chPrevCode = ch or 0x20
             ch = codeAt(str, pos++)
