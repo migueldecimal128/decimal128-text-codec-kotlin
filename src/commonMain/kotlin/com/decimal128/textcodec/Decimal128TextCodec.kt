@@ -400,8 +400,12 @@ object Decimal128TextCodec {
      * takes the high 64 bits, `out[1]` the low 64. On failure returns a
      * human-readable message and writes the canonical positive quiet NaN, so a
      * caller who discards the message still observes a legal IEEE 754-2019
-     * datum rather than stale or partial data. The exact wording of the
-     * message is not part of the contract and may change between versions.
+     * datum rather than stale or partial data. The message is the engine's
+     * ParseStatus name for the failure -- EMPTY_STRING, INVALID_FORMAT,
+     * UNEXPECTED_CHAR, DOUBLE_DOT, NO_COEFFICIENT_DIGIT, NO_EXPONENT_DIGIT,
+     * INVALID_UNDERSCORE_LOCATION, FAILURE_PARSING_INFINITY or
+     * FAILURE_PARSING_NAN -- and the conformance suite asserts it against the
+     * shared corpus, so it is part of the contract.
      *
      * Accepted input:
      *
@@ -459,8 +463,12 @@ object Decimal128TextCodec {
      * takes the high 64 bits, `out[1]` the low 64. On failure returns a
      * human-readable message and writes the canonical positive quiet NaN, so a
      * caller who discards the message still observes a legal IEEE 754-2019
-     * datum rather than stale or partial data. The exact wording of the
-     * message is not part of the contract and may change between versions.
+     * datum rather than stale or partial data. The message is the engine's
+     * ParseStatus name for the failure -- EMPTY_STRING, INVALID_FORMAT,
+     * UNEXPECTED_CHAR, DOUBLE_DOT, NO_COEFFICIENT_DIGIT, NO_EXPONENT_DIGIT,
+     * INVALID_UNDERSCORE_LOCATION, FAILURE_PARSING_INFINITY or
+     * FAILURE_PARSING_NAN -- and the conformance suite asserts it against the
+     * shared corpus, so it is part of the contract.
      *
      * Accepted input:
      *
@@ -967,8 +975,8 @@ object Decimal128TextCodec {
         if (chLower == 'n'.code || chLower == 's'.code || chLower == 'q'.code)
             return parseNanText(out, formatIsBid, sign, ch, str, pos)
         if (chFirst == -1)
-            return "empty string"
-        return "invalid format"
+            return "EMPTY_STRING"
+        return "INVALID_FORMAT"
     }
 
     /**
@@ -987,13 +995,13 @@ object Decimal128TextCodec {
                 if (ch == -1)
                     break
                 else
-                    return "failure parsing Infinity"
+                    return "FAILURE_PARSING_INFINITY"
             }
             chPrevCode = ch or 0x20
             ch = codeAt(str, pos++)
         }
         if (ch != -1 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
-            return "failure parsing Infinity"
+            return "FAILURE_PARSING_INFINITY"
         out[0] = INF_PATTERN_HI or if (sign) SIGN_BIT else 0L
         out[1] = 0L
         return null
@@ -1035,7 +1043,7 @@ object Decimal128TextCodec {
             ((codeAt(str, pos++) or 0x20) != 'a'.code) ||
             ((codeAt(str, pos++) or 0x20) != 'n'.code)
         )
-            return "failure parsing NaN"
+            return "FAILURE_PARSING_NAN"
         var payloadDw0 = 0L
         var payloadDw1 = 0L
         ch = codeAt(str, pos++)
@@ -1062,15 +1070,15 @@ object Decimal128TextCodec {
                 ch = codeAt(str, pos++)
             }
             if (accumDigitCount == 0)
-                return if (hasParen) "failure parsing NaN" else "non-digit NaN payload character"
+                return if (hasParen) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
             if (hasParen) {
                 // the ')' must be present and must end the input
                 if (ch != ')'.code)
-                    return if (ch == -1) "failure parsing NaN" else "non-digit NaN payload character"
+                    return if (ch == -1) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
                 if (codeAt(str, pos++) != -1)
-                    return "failure parsing NaN"
+                    return "FAILURE_PARSING_NAN"
             } else if (ch != -1) {
-                return "non-digit NaN payload character"
+                return "FAILURE_PARSING_NAN"
             }
             if (accumDigitCount > 33) {
                 // IEEE754-2019 3.5.2 Encodings
@@ -1210,7 +1218,7 @@ object Decimal128TextCodec {
                 }
 
                 '_'.code -> when {
-                    !prevWasDigit -> return "invalid underscore location"
+                    !prevWasDigit -> return "INVALID_UNDERSCORE_LOCATION"
                     else -> {
                         prevWasDigit = false
                         afterUnderscore = true
@@ -1218,8 +1226,8 @@ object Decimal128TextCodec {
                 }
 
                 '.'.code -> when {
-                    afterUnderscore -> return "invalid underscore location"
-                    hasDot -> return "double radix dot"
+                    afterUnderscore -> return "INVALID_UNDERSCORE_LOCATION"
+                    hasDot -> return "DOUBLE_DOT"
                     else -> {
                         hasDot = true
                         prevWasDigit = false
@@ -1229,9 +1237,9 @@ object Decimal128TextCodec {
             ch = codeAt(str, pos++)
         }
         if (afterUnderscore)
-            return "invalid underscore location"
+            return "INVALID_UNDERSCORE_LOCATION"
         if (!hasCoefficientDigit)
-            return "no coefficient digit"
+            return "NO_COEFFICIENT_DIGIT"
         // this path has at least one digit
         if (ch == 'E'.code || ch == 'e'.code) {
             ch = codeAt(str, pos++)
@@ -1246,7 +1254,7 @@ object Decimal128TextCodec {
             while (ch in '0'.code..'9'.code || ch == '_'.code) {
                 when (ch) {
                     '_'.code -> when {
-                        !prevWasDigit -> return "invalid underscore location"
+                        !prevWasDigit -> return "INVALID_UNDERSCORE_LOCATION"
                         else -> {
                             prevWasDigit = false
                             afterUnderscore = true
@@ -1267,15 +1275,15 @@ object Decimal128TextCodec {
                 ch = codeAt(str, pos++)
             }
             if (afterUnderscore)
-                return "invalid underscore location"
+                return "INVALID_UNDERSCORE_LOCATION"
             if (!hasExpDigit)
-                return "no exponent digit"
+                return "NO_EXPONENT_DIGIT"
             // clamp exp to 9999 once after the loop
             if (expSignificantDigitCount > 4)
                 exp = 9999
         }
         if (ch != -1)
-            return "unexpected char"
+            return "UNEXPECTED_CHAR"
         // we have at least one digit
         var dw0 = accum19a
         var dw1 = 0L

@@ -95,6 +95,8 @@ class TestCorpusVectors {
                 "error line " + row.lineNumber + ": dpd ACCEPTED <" + row.text + ">, corpus says " + row.status)
             assertEquals(b.error, d.error,
                 "error line " + row.lineNumber + ": the formats disagree on <" + row.text + ">")
+            assertEquals(row.status, b.error,
+                "error line " + row.lineNumber + ": <" + row.text + "> disagrees with the corpus status")
             assertEquals(row.bidHex, b.hex, "error line " + row.lineNumber + ": bid <" + row.text + ">")
             assertEquals(row.bidHex, d.hex, "error line " + row.lineNumber + ": dpd <" + row.text + ">")
         }
