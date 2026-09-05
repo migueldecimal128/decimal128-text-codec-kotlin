@@ -395,6 +395,17 @@ object Decimal128TextCodec {
 
     // -- decode to String --------------------------------------------------------
 
+    // ----------------------------------------------------------------------
+    // Format constants -- IEEE 754-2019 Table 3.6, decimal128
+    // ----------------------------------------------------------------------
+
+    private const val K_WIDTH = 128 // storage width in bits
+    private const val BIAS = 6176
+    private const val Q_MIN = -6176 // the minimum quantum exponent
+    private const val Q_MAX = 6111  // the maximum quantum exponent
+    private const val T_WIDTH = 110 // trailing significand field width in bits
+    private const val W5 = 17       // combination field width in bits
+
     // 10**34 ... has 35 digits ... maxx = max eXclusive
     private const val MAXX_COEFF_34_HI = 0x0001ED09BEAD87C0L
     private const val MAXX_COEFF_34_LO = 0x378D8E6400000000L
@@ -460,13 +471,9 @@ object Decimal128TextCodec {
      */
     private fun decodeBid128toAscii(out: ByteArray, bid128Hi: Long, bid128Lo: Long): Int {
         // IEEE754-2019 Table 3.6-Decimal2 Interchange format parameters -- p 23
-        val k = 128 // storage width in bits
         // val p = 34 // precision in digits
         // val emax = 6144
-        val bias = 6176
-        val w5 = 17 // w+5, combination field width in bits
-        val t = 110 // trailing significand field width in bits
-        verify { 1 + w5 + t == k }
+        verify { 1 + W5 + T_WIDTH == K_WIDTH }
 
         // The API's contract is a buffer of at least MAX_LEN, so that is what
         // is checked -- once, on every call, rather than per value. A shorter
@@ -478,15 +485,15 @@ object Decimal128TextCodec {
         // 1 + 17 + 110 == 128
         // 1 bit for the sign
         val sign = bid128Hi < 0L
-        // w5 bit combination field ... for bid128 0x1FFFF
-        val combination = (bid128Hi shr (t - 64)).toInt() and 0x1FFFF
-        val coeffTHi = bid128Hi and ((1L shl t) - 1L)
+        // W5 bit combination field ... for bid128 0x1FFFF
+        val combination = (bid128Hi shr (T_WIDTH - 64)).toInt() and 0x1FFFF
+        val coeffTHi = bid128Hi and ((1L shl T_WIDTH) - 1L)
 
         val coeffHi: Long
         val qExp: Int
         when {
             // if the top 2 bits are not 0b11
-            combination shr (w5 - 2) != 0b11 -> {
+            combination shr (W5 - 2) != 0b11 -> {
                 //  IEEE754-2019 3.5.2 c) 2) i) -- p 21
                 //   If G0 and G1 together are one of 00, 01, or 10, then the biased
                 //   exponent E is formed from G0 through Gw+1 and the significand
@@ -495,13 +502,13 @@ object Decimal128TextCodec {
                 // w+5=17 w=12 Gw+1=G13 Gw+2=G14
                 // the top 14 bits of the combination field represent the biased exponent ...
                 val biasedExponentE = combination shr 3
-                qExp = biasedExponentE - bias
+                qExp = biasedExponentE - BIAS
                 // ... and the bottom 3 bits are the most significant bits of the significand
                 // coeff/significand is 3 + 110 == 113 ... but that's not all ... see below
                 coeffHi = (combination and 0x07).toLong()
             }
 
-            combination shr (w5 - 4) != 0b1111 -> {
+            combination shr (W5 - 4) != 0b1111 -> {
                 // IEEE754-2019 3.5.2 c) 2) ii) -- p 21
                 //  If G0 and G1 together are 11 and G2 and G3 together are one
                 //  of 00, 01, or 10, then the biased exponent E is formed from
@@ -510,20 +517,20 @@ object Decimal128TextCodec {
                 //
                 // w+5=17 w=12 Gw+3=G15 Gw+4=G16
                 //
-                val biasedExponentE = (combination ushr 1) and ((1 shl (w5 - 5 + 2)) - 1)
-                qExp = biasedExponentE - bias
+                val biasedExponentE = (combination ushr 1) and ((1 shl (W5 - 5 + 2)) - 1)
+                qExp = biasedExponentE - BIAS
                 coeffHi = 8L + (combination and 1).toLong()
             }
             // if the top 5 bits are 0b11110 then Infinity
-            (combination shr (w5 - 5)) == 0b11110 -> {
+            (combination shr (W5 - 5)) == 0b11110 -> {
                 return infBytes(out, sign)
             }
             // if the top 5 bits are 0x11111 then NaN
-            (combination shr (w5 - 5)) == 0b11111 -> {
+            (combination shr (W5 - 5)) == 0b11111 -> {
                 // with the next bit determining signaling NaN
                 val payloadHi = coeffTHi
                 val payloadLo = bid128Lo
-                val isSignaling = ((combination shr (w5 - 6)) and 1) != 0
+                val isSignaling = ((combination shr (W5 - 6)) and 1) != 0
                 return nanBytes(out, sign, isSignaling, payloadHi, payloadLo)
             }
 
@@ -532,7 +539,7 @@ object Decimal128TextCodec {
                 throw IllegalStateException()
             }
         }
-        val dw1 = ((coeffHi shl (t - 64)) or coeffTHi)
+        val dw1 = ((coeffHi shl (T_WIDTH - 64)) or coeffTHi)
         val dw0 = bid128Lo
         // IEEE754-2019 3.5.2 p21
         //  If the value exceeds the maximum, the significand c is
@@ -554,10 +561,7 @@ object Decimal128TextCodec {
      * renderers, which have never seen an interchange format.
      */
     private fun decodeDpd128toAscii(out: ByteArray, dpd128Hi: Long, dpd128Lo: Long): Int {
-        val bias = 6176
         val w = 12  // exponent continuation width
-        val w5 = 17 // combination field width in bits
-        val t = 110 // trailing significand field width in bits
 
         // The API's contract is a buffer of at least MAX_LEN, so that is what
         // is checked -- once, on every call, rather than per value. A shorter
@@ -567,7 +571,7 @@ object Decimal128TextCodec {
         demand(out.size >= MAX_LEN, "the buffer is at least MAX_LEN bytes")
 
         val sign = dpd128Hi < 0L
-        val combination = (dpd128Hi shr (t - 64)).toInt() and 0x1FFFF
+        val combination = (dpd128Hi shr (T_WIDTH - 64)).toInt() and 0x1FFFF
         // in DPD the low w bits of the biased exponent always sit at the bottom of G
         val expContinuation = combination and 0x0FFF
 
@@ -578,27 +582,27 @@ object Decimal128TextCodec {
 
         when {
             // G0G1 is 00, 01 or 10: leading digit 0..7, exponent MSBs in G0G1
-            combination shr (w5 - 2) != 0b11 -> {
-                val expMSB = combination shr (w5 - 2)
-                qExp = ((expMSB shl w) or expContinuation) - bias
+            combination shr (W5 - 2) != 0b11 -> {
+                val expMSB = combination shr (W5 - 2)
+                qExp = ((expMSB shl w) or expContinuation) - BIAS
                 d0 = ((combination shr w) and 0b111).toLong()
             }
 
             // G0G1 is 11 and G2G3 is not 11: leading digit 8..9, exponent MSBs in G2G3
-            combination shr (w5 - 4) != 0b1111 -> {
-                val expMSB = (combination shr (w5 - 4)) and 0b11
-                qExp = ((expMSB shl w) or expContinuation) - bias
+            combination shr (W5 - 4) != 0b1111 -> {
+                val expMSB = (combination shr (W5 - 4)) and 0b11
+                qExp = ((expMSB shl w) or expContinuation) - BIAS
                 d0 = 8L + ((combination shr w) and 0b1).toLong()
             }
 
-            (combination shr (w5 - 5)) == 0b11110 -> {
+            (combination shr (W5 - 5)) == 0b11110 -> {
                 return infBytes(out, sign)
             }
 
             else -> {
-                verify { (combination shr (w5 - 5)) == 0b11111 }
+                verify { (combination shr (W5 - 5)) == 0b11111 }
                 isNaN = true
-                isSignaling = ((combination shr (w5 - 6)) and 1) != 0
+                isSignaling = ((combination shr (W5 - 6)) and 1) != 0
                 d0 = 0L
                 qExp = 0
             }
@@ -1197,7 +1201,7 @@ object Decimal128TextCodec {
         val declets6Lo = decletsFromBin(binLo)
 
         val gField = (0b11111 shl 12) or (if (isSignaling) 1 shl 11 else 0)
-        val signCombo = ((if (sign) 1 else 0) shl 17) or gField
+        val signCombo = ((if (sign) 1 else 0) shl W5) or gField
         out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
         out[1] = (declets5Hi shl 60) or declets6Lo
     }
@@ -1412,7 +1416,7 @@ object Decimal128TextCodec {
             }
             // Step 2: zero coefficient with out-of-range qExp ... clamp qExp
             if ((dw1In or dw0In) == 0L) {
-                val qClamped = max(min(qExpIn, 6111), -6176)
+                val qClamped = max(min(qExpIn, Q_MAX), Q_MIN)
                 setFinite(out, formatIsBid, sign, qClamped, 0L, 0L)
                 return
             }
@@ -1453,7 +1457,7 @@ object Decimal128TextCodec {
 
         // Step 4: underflow. With no precision truncation to outrank it, the
         // test is simply whether the exponent is below the minimum.
-        if (qExpIn < -6176) {
+        if (qExpIn < Q_MIN) {
             finalizeUnderflowRegion(out, formatIsBid, sign, qExpIn, dw1In, dw0In, residueIn)
             return
         }
@@ -1479,10 +1483,10 @@ object Decimal128TextCodec {
         }
 
         // step 7: check final bounds
-        verify { qExp >= -6176 }
+        verify { qExp >= Q_MIN }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
-        if (qExp > 6111) {
-            val qExcess = qExp - 6111
+        if (qExp > Q_MAX) {
+            val qExcess = qExp - Q_MAX
             val digitLen = calcDigitLen128(dw1, dw0)
             if (digitLen + qExcess <= 34)
                 finalizeClamping(out, formatIsBid, sign, qExp, dw1, dw0)
@@ -1520,7 +1524,7 @@ object Decimal128TextCodec {
      * [out] doubles as scratch for the two divisions before it is written.
      */
     private fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        verify { qExp >= -6176 && qExp <= 6111 }
+        verify { qExp >= Q_MIN && qExp <= Q_MAX }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
 
         // Split the coefficient into its low 18 digits and its high 16.
@@ -1538,13 +1542,13 @@ object Decimal128TextCodec {
         val declets6Lo = decletsFromBin(binLo)
         verify { d0 in 0L..9L }
 
-        val biasedQExp = qExp + 6176
+        val biasedQExp = qExp + BIAS
         val expMSB = (biasedQExp shr 12) and 0x3
         val expLSB = biasedQExp and 0x0FFF
         val gPrefix =
             if (d0 <= 7L) (expMSB shl 3) or d0.toInt()          // G0G1 = exponent MSBs
             else 0b11000 or (expMSB shl 1) or (d0.toInt() and 1) // G0G1 = 11, digit is 8 or 9
-        val signCombo = ((if (sign) 1 else 0) shl 17) or (gPrefix shl 12) or expLSB
+        val signCombo = ((if (sign) 1 else 0) shl W5) or (gPrefix shl 12) or expLSB
 
         out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
         out[1] = (declets5Hi shl 60) or declets6Lo
@@ -1563,9 +1567,9 @@ object Decimal128TextCodec {
      * must have at most 34 decimal digits.
      */
     private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        verify { qExp >= -6176 && qExp <= 6111 }
+        verify { qExp >= Q_MIN && qExp <= Q_MAX }
         verify { calcDigitLen128(dw1, dw0) <= 34 }
-        val qBiased = qExp + 6176
+        val qBiased = qExp + BIAS
         val s = if (sign) SIGN_BIT else 0L
         val g = qBiased.toLong() shl (3 + 46)
         out[0] = s or g or dw1
@@ -1594,7 +1598,7 @@ object Decimal128TextCodec {
      * and produces the clamped encoding.
      */
     private fun finalizeClamping(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        val qExcess = qExp - 6111
+        val qExcess = qExp - Q_MAX
         verify { qExcess > 0 && qExcess <= 34 - calcDigitLen128(dw1, dw0) }
         val pow10Offset = qExcess shl 1
         val y1 = POW10[pow10Offset + 1]
@@ -1605,8 +1609,8 @@ object Decimal128TextCodec {
         val pp01Lo = dw0 * y1
         val dw0Scaled = pp00Lo
         val dw1Scaled = pp00Hi + pp10Lo + pp01Lo
-        verify { coeffQExpFit(dw1Scaled, dw0Scaled, 6111) }
-        setFinite(out, formatIsBid, sign, 6111, dw1Scaled, dw0Scaled)
+        verify { coeffQExpFit(dw1Scaled, dw0Scaled, Q_MAX) }
+        setFinite(out, formatIsBid, sign, Q_MAX, dw1Scaled, dw0Scaled)
     }
 
     /**
@@ -1619,9 +1623,9 @@ object Decimal128TextCodec {
      * compares against the precomputed POW10[34] constant.
      */
     private inline fun coeffQExpFit(dw1: Long, dw0: Long, qExp: Int): Boolean {
-        if (qExp < -6176 || qExp > 6111)
+        if (qExp < Q_MIN || qExp > Q_MAX)
             return false
-        if (dw1.countLeadingZeroBits() > 128 - 113)
+        if (dw1.countLeadingZeroBits() > K_WIDTH - 113)
             return true
         val pow10Offset = 34 shl 1
         val maxxHi = POW10[pow10Offset + 1]
@@ -1649,15 +1653,15 @@ object Decimal128TextCodec {
         residue: Int
     ) {
         // IEEE 754-2019 7.5 Underflow -- the subnormal region
-        verify { qExp < -6176 }
-        val truncationNeeded = -6176 - qExp
+        verify { qExp < Q_MIN }
+        val truncationNeeded = Q_MIN - qExp
         val digitLen = calcDigitLen128(dw1, dw0)
         verify { digitLen <= 34 }
         when {
             truncationNeeded > digitLen -> {
                 // Result is swamped - becomes zero with roundTiesToEven
                 // This is always inexact
-                roundAndFinalizeFinite(out, formatIsBid, sign, -6176, 0L, 0L, LT_HALF)
+                roundAndFinalizeFinite(out, formatIsBid, sign, Q_MIN, 0L, 0L, LT_HALF)
             }
 
             truncationNeeded == digitLen ->
@@ -1689,21 +1693,21 @@ object Decimal128TextCodec {
         val totalResidue = residueMerge(scaleResidue, residueIn)
         // roundTiesToEven ...
         // only if we are GT_HALF since otherwise the result is 0 ... which is even
-        setFinite(out, formatIsBid, sign, -6176, 0L, if (totalResidue == GT_HALF) 1L else 0L)
+        setFinite(out, formatIsBid, sign, Q_MIN, 0L, if (totalResidue == GT_HALF) 1L else 0L)
     }
 
     private fun finalizeSubnormal(
         out: LongArray, formatIsBid: Boolean, sign: Boolean, qExpIn: Int,
         dw1In: Long, dw0In: Long, residueIn: Int
     ) {
-        val truncationNeeded = -6176 - qExpIn
+        val truncationNeeded = Q_MIN - qExpIn
         verify { truncationNeeded > 0 && truncationNeeded < calcDigitLen128(dw1In, dw0In) }
 
         val scaleResidue = u128ScaleDownPow10(out, dw1In, dw0In, truncationNeeded)
         val totalResidue = residueMerge(scaleResidue, residueIn)
         var dw1T = out[0]
         var dw0T = out[1]
-        var qExpT = -6176
+        var qExpT = Q_MIN
 
         val roundUp =
             totalResidue == GT_HALF || totalResidue == HALF && (dw0T and 1L) != 0L
