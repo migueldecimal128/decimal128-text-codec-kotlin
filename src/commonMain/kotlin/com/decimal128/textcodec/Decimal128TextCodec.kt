@@ -184,9 +184,8 @@ object Decimal128TextCodec {
      * checks: with slack, an error in the arithmetic above would quietly
      * consume the slack instead of firing.
      *
-     * A buffer passed to `bid128ToAscii` must be at least this long. The C
-     * port's `D128TEXT_MAX_LEN` is one larger, because it writes a NUL and
-     * this does not.
+     * A buffer passed to `bid128ToAscii` must be at least this long. No NUL
+     * is written, so no room is reserved for one.
      */
     const val MAX_LEN = 42
 
@@ -1042,13 +1041,13 @@ object Decimal128TextCodec {
      * are not this form at all.
      *
      * The reason this spelling exists at all
-     * is that C's own `strtod` reads
+     * is that the platform's own `strtod` reads
      * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
      * platform itself. The resemblance stops at the parentheses -- strtod's
      * sequence is letters, digits and underscores read as an
      * implementation-defined integer (`NAN(abc)` and `NAN(0x1c8)` are legal
      * there), while a decimal128 payload is decimal digits. This is a
-     * paren-tolerant spelling of our own payload syntax, not C's.
+     * paren-tolerant spelling of our own payload syntax, not strtod's.
      *
      * The legacy base skipped `(`, `)`, `[`, `]`, `{` and `}` ANYWHERE, so it
      * read `NaN(1)2(3)` as payload 123. That is not this, and stays rejected.

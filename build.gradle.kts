@@ -17,12 +17,10 @@ repositories {
     mavenCentral()
 }
 
-// `-Pverify` arms the compile-gated verify() state assertions, the same switch
-// every sibling port carries: -DVERIFY_ENABLED=1 in C, -tags verify in Go,
-// --features verify in Rust, -Dverify in Zig, the Debug configuration in Swift
-// and C#, -ea in Java. Off by default, because a consumer compiles this module
-// into their own program and must not take a throw inside a library on data
-// they do not control. CI runs one armed pass.
+// `-Pverify` arms the compile-gated verify() state assertions. Off by default,
+// because a consumer compiles this module into their own program and must not
+// take a throw inside a library on data they do not control. CI runs one armed
+// pass.
 //
 // Kotlin has no preprocessor, so the flag reaches the source as a generated
 // `const val` in commonMain: a const folds at compile time, so with the flag
