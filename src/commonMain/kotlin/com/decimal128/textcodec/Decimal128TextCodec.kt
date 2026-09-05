@@ -93,6 +93,22 @@ object Decimal128TextCodec {
             check(block())
     }
 
+    // demand carries the two claims that must hold in every configuration:
+    // that the caller's buffer is at least MAX_LEN, checked once on entry,
+    // and that a coefficient handed to the encoder is inside the precision
+    // limit. Unlike verify these stay live whatever the flag says, because
+    // the alternative is overrunning the buffer or silently encoding an
+    // out-of-range value.
+
+    private fun demand(condition: Boolean, message: String) {
+        if (!condition)
+            impossible(message)
+    }
+
+    private fun impossible(message: String): Nothing =
+        throw IllegalStateException(
+            "decimal128-text-codec: impossible state: " + message)
+
     /**
      * Render a BID128 encoding as a decimal character sequence.
      *
@@ -179,10 +195,12 @@ object Decimal128TextCodec {
      * exponent field cannot exceed four digits inside decimal128's range, so
      * neither number can drift without the format itself changing.
      *
-     * Every write in the renderers is guarded against this bound. Sizing it
-     * exactly rather than generously is what turns those guards into real
-     * checks: with slack, an error in the arithmetic above would quietly
-     * consume the slack instead of firing.
+     * The renderers are checked against this bound once, on entry, rather
+     * than at every write: the buffer is confirmed to be at least this long
+     * and the forms above are what guarantee nothing longer is produced.
+     * Sizing it exactly rather than generously is what keeps the two halves
+     * of that argument in contact; with slack, an error in the arithmetic
+     * above would quietly consume the slack instead of showing up.
      *
      * A buffer passed to `bid128ToAscii` must be at least this long. No NUL
      * is written, so no room is reserved for one.
@@ -196,9 +214,9 @@ object Decimal128TextCodec {
      * Writes the ASCII text into `out` starting at index 0 and returns its
      * length; the text is `out[0]` through `out[n - 1]`. No terminator is
      * written. `out` must be at least `MAX_LEN` long; a shorter one throws
-     * `IndexOutOfBoundsException` on the first write past its end rather than
-     * corrupting anything, so an undersized buffer is a caller bug that
-     * surfaces immediately.
+     * `IllegalStateException` on entry rather than corrupting anything, so an
+     * undersized buffer is a caller bug that surfaces immediately -- on every
+     * call, not only on the values that would have overflowed it.
      *
      * The text is identical to what `bid128ToString` returns, and this form is
      * the one to reach for when the destination is bytes — a stream, a socket,
@@ -226,9 +244,9 @@ object Decimal128TextCodec {
      * Writes the ASCII text into `out` starting at index 0 and returns its
      * length; the text is `out[0]` through `out[n - 1]`. No terminator is
      * written. `out` must be at least `MAX_LEN` long; a shorter one throws
-     * `IndexOutOfBoundsException` on the first write past its end rather than
-     * corrupting anything, so an undersized buffer is a caller bug that
-     * surfaces immediately.
+     * `IllegalStateException` on entry rather than corrupting anything, so an
+     * undersized buffer is a caller bug that surfaces immediately -- on every
+     * call, not only on the values that would have overflowed it.
      *
      * The text is identical to what `dpd128ToString` returns, and this form is
      * the one to reach for when the destination is bytes — a stream, a socket,
@@ -450,6 +468,13 @@ object Decimal128TextCodec {
         val t = 110 // trailing significand field width in bits
         verify { 1 + w5 + t == k }
 
+        // The API's contract is a buffer of at least MAX_LEN, so that is what
+        // is checked -- once, on every call, rather than per value. A shorter
+        // buffer that happens to fit the value in hand is still a caller bug,
+        // and one that would otherwise surface only on the data that overflows
+        // it.
+        demand(out.size >= MAX_LEN, "the buffer is at least MAX_LEN bytes")
+
         // 1 + 17 + 110 == 128
         // 1 bit for the sign
         val sign = bid128Hi < 0L
@@ -533,6 +558,13 @@ object Decimal128TextCodec {
         val w = 12  // exponent continuation width
         val w5 = 17 // combination field width in bits
         val t = 110 // trailing significand field width in bits
+
+        // The API's contract is a buffer of at least MAX_LEN, so that is what
+        // is checked -- once, on every call, rather than per value. A shorter
+        // buffer that happens to fit the value in hand is still a caller bug,
+        // and one that would otherwise surface only on the data that overflows
+        // it.
+        demand(out.size >= MAX_LEN, "the buffer is at least MAX_LEN bytes")
 
         val sign = dpd128Hi < 0L
         val combination = (dpd128Hi shr (t - 64)).toInt() and 0x1FFFF
@@ -1417,7 +1449,7 @@ object Decimal128TextCodec {
         // invariant, which is exactly when a loud failure is wanted. A caller
         // that is not a parser needs the truncation step back, as a multiply
         // or an FMA would.
-        check(calcDigitLen128(dw1In, dw0In) <= 34)
+        demand(calcDigitLen128(dw1In, dw0In) <= 34, "coefficient wider than precision")
 
         // Step 4: underflow. With no precision truncation to outrank it, the
         // test is simply whether the exponent is below the minimum.
