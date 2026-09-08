@@ -1299,6 +1299,11 @@ object Decimal128TextCodec {
         return totalLen
     }
 
+    /**
+     * Finite non-zero: pick the form. Integer when the quantum exponent is
+     * zero, fixed-point when it is negative and the adjusted exponent is at
+     * least `-6`, scientific otherwise -- the GDAS auto-select rule.
+     */
     private fun fnzAscii(out: ByteArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long): Int {
         val digitLen = calcDigitLen128(dw1, dw0)
         val eExp = qExp + (digitLen - 1)
