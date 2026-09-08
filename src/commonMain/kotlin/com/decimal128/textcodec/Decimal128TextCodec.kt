@@ -88,6 +88,20 @@ object Decimal128TextCodec {
     // neither the message nor the predicate survives. CI runs one armed pass
     // over the whole corpus.
 
+
+    // ------------------------------------------------------------------
+    // Internal-state assertions
+    // ------------------------------------------------------------------
+
+    private fun impossible(message: String): Nothing =
+        throw IllegalStateException(
+            "decimal128-text-codec: impossible state: " + message)
+
+    private fun demand(condition: Boolean, message: String) {
+        if (!condition)
+            impossible(message)
+    }
+
     private inline fun verify(block: () -> Boolean) {
         if (VERIFY_ENABLED)
             check(block())
@@ -100,14 +114,41 @@ object Decimal128TextCodec {
     // the alternative is overrunning the buffer or silently encoding an
     // out-of-range value.
 
-    private fun demand(condition: Boolean, message: String) {
-        if (!condition)
-            impossible(message)
-    }
+    // ------------------------------------------------------------------
+    // Public constants
+    // ------------------------------------------------------------------
 
-    private fun impossible(message: String): Nothing =
-        throw IllegalStateException(
-            "decimal128-text-codec: impossible state: " + message)
+    /**
+     * The exact bound on a rendered decimal128, in ASCII character bytes.
+     *
+     * The widest scientific form `-9.999...E-6143` is 1 sign, 1 digit, 1 radix
+     * point, 33 digits, 1 `E`, 1 sign and 4 exponent digits; the widest plain
+     * form `-0.00000999...` is 1 sign, 1 zero, 1 radix point, 5 leading zeros
+     * and 34 digits. Each form reaches exactly 42.
+     *
+     * The plain form's five leading zeros are pinned by the GDAS rule that
+     * selects it only when the adjusted exponent is at least -6, which puts
+     * five zeros between the radix point and the first significant digit. The
+     * exponent field cannot exceed four digits inside decimal128's range, so
+     * neither number can drift without the format itself changing.
+     *
+     * The renderers are checked against this bound once, on entry, rather
+     * than at every write: the buffer is confirmed to be at least this long
+     * and the forms above are what guarantee nothing longer is produced.
+     * Sizing it exactly rather than generously is what keeps the two halves
+     * of that argument in contact; with slack, an error in the arithmetic
+     * above would quietly consume the slack instead of showing up.
+     *
+     * A buffer passed to `bid128ToAscii` must be at least this long. No NUL
+     * is written, so no room is reserved for one.
+     */
+    const val MAX_LEN = 42
+
+    private const val QNAN_PATTERN_HI = 0x7C00000000000000L
+
+    // ------------------------------------------------------------------
+    // Public API
+    // ------------------------------------------------------------------
 
     /**
      * Render a BID128 encoding as a decimal character sequence.
@@ -180,32 +221,6 @@ object Decimal128TextCodec {
         val len = dpd128ToAscii(ascii, dpd128Hi, dpd128Lo)
         return ascii.decodeToString(0, len)
     }
-
-    /**
-     * The exact bound on a rendered decimal128, in ASCII character bytes.
-     *
-     * The widest scientific form `-9.999...E-6143` is 1 sign, 1 digit, 1 radix
-     * point, 33 digits, 1 `E`, 1 sign and 4 exponent digits; the widest plain
-     * form `-0.00000999...` is 1 sign, 1 zero, 1 radix point, 5 leading zeros
-     * and 34 digits. Each form reaches exactly 42.
-     *
-     * The plain form's five leading zeros are pinned by the GDAS rule that
-     * selects it only when the adjusted exponent is at least -6, which puts
-     * five zeros between the radix point and the first significant digit. The
-     * exponent field cannot exceed four digits inside decimal128's range, so
-     * neither number can drift without the format itself changing.
-     *
-     * The renderers are checked against this bound once, on entry, rather
-     * than at every write: the buffer is confirmed to be at least this long
-     * and the forms above are what guarantee nothing longer is produced.
-     * Sizing it exactly rather than generously is what keeps the two halves
-     * of that argument in contact; with slack, an error in the arithmetic
-     * above would quietly consume the slack instead of showing up.
-     *
-     * A buffer passed to `bid128ToAscii` must be at least this long. No NUL
-     * is written, so no room is reserved for one.
-     */
-    const val MAX_LEN = 42
 
     /**
      * Render a BID128 encoding into a caller-supplied buffer, allocating
@@ -398,45 +413,905 @@ object Decimal128TextCodec {
 
     // -- decode to String --------------------------------------------------------
 
-    // ----------------------------------------------------------------------
+    // ------------------------------------------------------------------
     // Format constants -- IEEE 754-2019 Table 3.6, decimal128
-    // ----------------------------------------------------------------------
+    // ------------------------------------------------------------------
 
     private const val K_WIDTH = 128 // storage width in bits
+
     private const val BIAS = 6176
+
     private const val Q_MIN = -6176 // the minimum quantum exponent
+
     private const val Q_MAX = 6111  // the maximum quantum exponent
+
     private const val T_WIDTH = 110 // trailing significand field width in bits
+
     private const val W5 = 17       // combination field width in bits
 
     // 10**34 ... has 35 digits ... maxx = max eXclusive
     private const val MAXX_COEFF_34_HI = 0x0001ED09BEAD87C0L
+
     private const val MAXX_COEFF_34_LO = 0x378D8E6400000000L
 
     // 10**33 is the smallest 34-digit coefficient
     private const val MIN_PRECISION_34_COEFF_HI = 0x0000314DC6448D93L
+
     private const val MIN_PRECISION_34_COEFF_LO = 0x38C15B0A00000000L
 
     // 33 nines
     private const val MAX_PAYLOAD_HI = MIN_PRECISION_34_COEFF_HI
+
     private const val MAX_PAYLOAD_LO = MIN_PRECISION_34_COEFF_LO - 1L
 
     // The encoding's fixed bit patterns. SIGN_BIT is 0x8000000000000000
     // spelled as Long.MIN_VALUE, which is that pattern in a signed dword --
     // the same reason this file carries unsignedLT, unsignedCmp and ushr.
     private const val SIGN_BIT = Long.MIN_VALUE
+
     private const val INF_PATTERN_HI = 0x7800000000000000L
-    private const val QNAN_PATTERN_HI = 0x7C00000000000000L
+
     private const val SNAN_PATTERN_HI = 0x7E00000000000000L
 
+    private const val TEN_POW_15 = 1_000_000_000_000_000L
+
+    private const val TEN_POW_18 = 1_000_000_000_000_000_000L
+
+    /**
+     * Powers of 10 from `10^0` through `10^34` as 128-bit unsigned values
+     * in little-endian order: `POW10[2*i]` is the low 64 bits, `POW10[2*i + 1]`
+     * the high 64 bits, of `10^i`.
+     *
+     * Sized to the coefficient bound and indexed directly -- no mask, no
+     * padding. Every reachable index is at most 34: the binding case is
+     * [calcDigitLen128], whose input is always a coefficient or NaN payload
+     * below `10^34`, so `bitLen <= 113` and `(bitLen * 1233) ushr 12 <= 34`.
+     * It doubles as the `5^n` source for the divide kernel, since
+     * `10^n ushr n` is exactly `5^n`; there is no POW5 table.
+     */
+    private val POW10 = longArrayOf(
+        // little-endian order
+        1L, 0L,                            // 1 (0)
+        0x000000000000000AuL.toLong(), 0L, // 10 (10**1)
+        0x0000000000000064uL.toLong(), 0L, // 100 (10**2)
+        0x00000000000003E8uL.toLong(), 0L, // 1000 (10**3)
+        0x0000000000002710uL.toLong(), 0L, // 10000 (10**4)
+        0x00000000000186A0uL.toLong(), 0L, // 100000 (10**5)
+        0x00000000000F4240uL.toLong(), 0L, // 1000000 (10**6)
+        0x0000000000989680uL.toLong(), 0L, // 10000000 (10**7)
+        0x0000000005F5E100uL.toLong(), 0L, // 100000000 (10**8)
+        0x000000003B9ACA00uL.toLong(), 0L, // 1000000000 (10**9)
+        0x00000002540BE400uL.toLong(), 0L, // 10000000000 (10**10)
+        0x000000174876E800uL.toLong(), 0L, // 100000000000 (10**11)
+        0x000000E8D4A51000uL.toLong(), 0L, // 1000000000000 (10**12)
+        0x000009184E72A000uL.toLong(), 0L, // 10000000000000 (10**13)
+        0x00005AF3107A4000uL.toLong(), 0L, // 100000000000000 (10**14)
+        0x00038D7EA4C68000uL.toLong(), 0L, // 1000000000000000 (10**15)
+        0x002386F26FC10000uL.toLong(), 0L, // 10000000000000000 (10**16)
+        0x016345785D8A0000uL.toLong(), 0L, // 100000000000000000 (10**17)
+        0x0DE0B6B3A7640000uL.toLong(), 0L, // 1000000000000000000 (10**18)
+        0x8AC7230489E80000uL.toLong(), 0L, // 10000000000000000000 (10**19)
+        // minBitCount:64  maxBitCount:128
+        0x6BC75E2D63100000uL.toLong(), 0x0000000000000005uL.toLong(), // 10**20
+        0x35C9ADC5DEA00000uL.toLong(), 0x0000000000000036uL.toLong(), // 10**21
+        0x19E0C9BAB2400000uL.toLong(), 0x000000000000021EuL.toLong(), // 10**22
+        0x02C7E14AF6800000uL.toLong(), 0x000000000000152DuL.toLong(), // 10**23
+        0x1BCECCEDA1000000uL.toLong(), 0x000000000000D3C2uL.toLong(), // 10**24
+        0x161401484A000000uL.toLong(), 0x0000000000084595uL.toLong(), // 10**25
+        0xDCC80CD2E4000000uL.toLong(), 0x000000000052B7D2uL.toLong(), // 10**26
+        0x9FD0803CE8000000uL.toLong(), 0x00000000033B2E3CuL.toLong(), // 10**27
+        0x3E25026110000000uL.toLong(), 0x00000000204FCE5EuL.toLong(), // 10**28
+        0x6D7217CAA0000000uL.toLong(), 0x00000001431E0FAEuL.toLong(), // 10**29
+        0x4674EDEA40000000uL.toLong(), 0x0000000C9F2C9CD0uL.toLong(), // 10**30
+        0xC0914B2680000000uL.toLong(), 0x0000007E37BE2022uL.toLong(), // 10**31
+        0x85ACEF8100000000uL.toLong(), 0x000004EE2D6D415BuL.toLong(), // 10**32
+        0x38C15B0A00000000uL.toLong(), 0x0000314DC6448D93uL.toLong(), // 10**33
+        0x378D8E6400000000uL.toLong(), 0x0001ED09BEAD87C0uL.toLong(), // 10**34
+    )
+
+    /**
+     * Residue classification for rounding decisions.
+     *
+     * When discarding low-order digits during truncation to 34 significant
+     * digits, the discarded part falls into one of four categories relative
+     * to half a ulp of the retained value:
+     *
+     *  - [EXACT]   — discarded part is zero; no rounding needed
+     *  - [LT_HALF] — strictly less than half; round down (toward zero)
+     *  - [HALF]    — exactly half; tie-break per active rounding direction
+     *  - [GT_HALF] — strictly greater than half; round up (away from zero)
+     *
+     * For `roundTiesToEven`, [HALF] rounds to the nearest even retained
+     * digit; [LT_HALF] and [GT_HALF] are unambiguous; [EXACT] is a no-op.
+     */
+    private const val EXACT = 0
+
+    private const val LT_HALF = 1
+
+    private const val HALF = 2
+
+    private const val GT_HALF = 3
+
+    /**
+     * Lookup table mapping a discarded decimal digit (0..9) to its residue
+     * class. Two bits per digit, packed low-to-high:
+     *
+     *  - 0       → [EXACT]   (discarded digit is zero)
+     *  - 1..4    → [LT_HALF] (digit < 5)
+     *  - 5       → [HALF]    (digit is exactly 5)
+     *  - 6..9    → [GT_HALF] (digit > 5)
+     */
+    private const val DIGIT_MAP = 0b11_11_11_11_10_01_01_01_01_00
+
+    // ---- DPD declet conversion -------------------------------------------
+    //
+    // A declet is 10 bits holding three decimal digits, 0..999. This is the
+    // one place BID and DPD genuinely differ: BID stores the 34-digit
+    // coefficient as a binary integer, DPD stores it as a leading digit plus
+    // eleven declets.
+    //
+    // Both directions are pure boolean arithmetic (Cowlishaw's dpd2bcd and
+    // bcd2dpd) rather than lookup tables. Measured on this codebase, the
+    // arithmetic compiles to 2,814 bytes against 16,784 for the equivalent
+    // shortArrayOf tables -- the JVM has no array-literal constant, so a
+    // table becomes per-element initialisation bytecode -- and it allocates
+    // nothing at runtime, and behaves identically on every Kotlin target.
+
+    /**
+     * Reciprocal-multiplication constants for unsigned `÷ 10^8` on a 64-bit
+     * dividend, exact for all non-negative inputs.
+     *
+     * Compute `n / 10^8` as `mulhi64(n, M_U64_DIV_1E8) ushr S_U64_DIV_1E8`.
+     * The `S_U64_DIV_1E8` shift is "+ 64 high" because `mulhi64` already
+     * returns the upper 64 bits of the 128-bit product; the named shift
+     * combines with that to give the effective magic-number divide.
+     */
+    private const val M_U64_DIV_1E8 = Long.MIN_VALUE or 0x2BCC77118461CEFDL // -6067343680855748867
+
+    private const val S_U64_DIV_1E8 = 26 // + 64 high
+
+    /**
+     * Reciprocal-multiplication constants for unsigned division by small
+     * powers of 10 on 32-bit dividends.
+     *
+     * `M_U32_DIV_1E1` / `S_U32_DIV_1E1`: divide by 10, valid for
+     * dividends up to 2^32 - 1.
+     *
+     * `M_U32_DIV_1E2`: divide by 100, same range.
+     *
+     * `M_U64_DIV_1E4`: divide by 10000 on 64-bit dividends. Used to split
+     * an 8-digit value into two 4-digit halves.
+     */
+    private const val M_U32_DIV_1E1 = 0xCCCCCCCDL
+
+    private const val S_U32_DIV_1E1 = 35
+
+    private const val M_U32_DIV_1E2 = 0x51EB851FL
+
+    private const val S_U32_DIV_1E2 = 37
+
+    private const val M_U64_DIV_1E4 = 0x346DC5D63886594BL
+
+    private const val S_U64_DIV_1E4 = 11 // + 64 high
+
+    private const val MASK32L = 0x0000_0000_FFFF_FFFFL
+
+    private val INFINITY_TEXT = "Infinity".encodeToByteArray()
+
+    private val NAN_TEXT = "NaN".encodeToByteArray()
+
+    /**
+     * Every plain-form zero is a prefix of this literal. `k = -qExp` is the
+     * count of zeros after the radix point, so `k == 0` renders `"0"` with no
+     * radix point at all and `k >= 1` renders `"0."` followed by `k` zeros --
+     * lengths 1 and `k + 2`.
+     */
+    private val PLAIN_ZERO = "0.000000".encodeToByteArray()
+
+    private val ZERO_EXP_TEXT = "0E".encodeToByteArray()
+
     private const val ascii_minus: Byte = 0x2D
+
     private const val ascii_plus: Byte = 0x2B
+
     private const val ascii_0: Byte = 0x30
+
     private const val ascii_dot: Byte = 0x2E
+
     private const val ascii_E: Byte = 0x45
+
     private const val ascii_s: Byte = 0x73
 
+    // ------------------------------------------------------------------
+    // Low-level unsigned arithmetic
+    // ------------------------------------------------------------------
 
+    /**
+     * Unsigned compare of two `Long` values, by flipping the sign bit
+     * before doing a signed compare.
+     */
+    private inline fun unsignedCmp(x: Long, y: Long): Int =
+        (x xor Long.MIN_VALUE).compareTo(y xor Long.MIN_VALUE)
+
+    /**
+     * Unsigned less-than test for two `Long` values.
+     */
+    private inline fun unsignedLT(x: Long, y: Long): Boolean =
+        (x xor Long.MIN_VALUE) < (y xor Long.MIN_VALUE)
+
+    /**
+     * Compute the high 64 bits of the 128-bit unsigned product `x * y`.
+     *
+     * Splits each operand into 32-bit halves, computes four 32×32 → 64
+     * partial products, and assembles the high 64 bits with proper carry
+     * propagation through the middle.
+     */
+    private inline fun mulhi64(x: Long, y: Long): Long {
+        val xLo = x and 0xFFFFFFFFL
+        val xHi = x ushr 32
+        val yLo = y and 0xFFFFFFFFL
+        val yHi = y ushr 32
+
+        val pp00 = xLo * yLo
+        val pp01 = xHi * yLo
+        val pp10 = xLo * yHi
+        val pp11 = xHi * yHi
+
+        val mid = pp01 + pp10  // may overflow
+        val midCarryShifted = if (unsignedLT(mid, pp01)) (1L shl 32) else 0L
+
+        val midWithLo = (pp00 ushr 32) + (mid and 0xFFFFFFFFL)
+        // midWithLo cannot overflow: max is (2^32-1) + (2^32-1) < 2^33
+
+        return pp11 + (mid ushr 32) + midCarryShifted + (midWithLo ushr 32)
+    }
+
+    /**
+     * Compute the bit-length of a 128-bit unsigned value: the position of
+     * the highest set bit, plus one. Returns 0 for the zero value.
+     */
+    private inline fun calcBitLen128(dw1: Long, dw0: Long): Int {
+        return if (dw1 != 0L) 128 - dw1.countLeadingZeroBits()
+        else if (dw0 != 0L) 64 - dw0.countLeadingZeroBits()
+        else 0
+    }
+
+    /**
+     * Compute the decimal digit count of a 128-bit unsigned value.
+     *
+     * Uses the standard `log10/log2` approximation: for any non-zero
+     * `bitLen`, `(bitLen * 1233) >>> 12` is `floor(bitLen * log10(2))`,
+     * which is either the exact digit count or one too small. A single
+     * unsigned 128-bit compare against the next-larger power of 10 in
+     * [POW10] resolves the off-by-one.
+     */
+    private inline fun calcDigitLen128(dw1: Long, dw0: Long): Int {
+        val bitLen = calcBitLen128(dw1, dw0)
+        val loDigitCount = (bitLen * 1233) ushr 12
+        val hiDigitCount = loDigitCount + 1
+        val pow10Offset = (loDigitCount shl 1)
+        val p1 = POW10[pow10Offset + 1]
+        val p0 = POW10[pow10Offset]
+        val cmp1 = unsignedCmp(dw1, p1)
+        if (cmp1 != 0)
+            return hiDigitCount - (cmp1 ushr 31)
+        val cmp0 = unsignedCmp(dw0, p0)
+        return hiDigitCount - (cmp0 ushr 31)
+    }
+
+    /**
+     * Multiply a 128-bit unsigned value by `10^pow10` and add a 64-bit integer `a`,
+     * writing the 128-bit result into `out[0]` (high) and `out[1]` (low).
+     */
+    private inline fun u128FmaPow10(out: LongArray, x: Long, pow10: Int, a: Long) {
+        val y = POW10[pow10 shl 1]
+        val prodLo = x * y
+        val prodHi = mulhi64(x, y)
+        val sumLo = prodLo + a
+        val sumHi = prodHi + if (unsignedLT(sumLo, prodLo)) 1L else 0L
+        out[0] = sumHi
+        out[1] = sumLo
+    }
+
+    // ------------------------------------------------------------------
+    // The divide kernel
+    // ------------------------------------------------------------------
+
+    /**
+     * Divide a 113-bit unsigned coefficient by `10^pow10` for `pow10` in
+     * `1..9`. Factors `10^pow10` as `2^pow10 * 5^pow10`: the low `pow10`
+     * bits are extracted directly as the low part of the remainder, then
+     * the shifted value is divided by `5^pow10` using two hardware
+     * `Long` divides.
+     */
+    private fun u113DivModPow10Max9(quotLongs: LongArray, dwHi: Long, dwLo: Long, pow10: Int): Long {
+        verify { pow10 in 1..9 }
+        verify { dwHi.countLeadingZeroBits() >= 15 }
+
+        val mask = (1L shl pow10) - 1
+        val b = dwLo and mask
+        val sHi = dwHi ushr pow10
+        val sLo = (dwLo ushr pow10) or (dwHi shl (64 - pow10))
+
+        val k = 50 - pow10
+        val maskK = (1L shl k) - 1
+        val hi63 = (sHi shl (14 + pow10)) or (sLo ushr k)
+        val loK = sLo and maskK
+        // remember ... this POW10 table has 2 slots per power, so double the index
+        val d = POW10[pow10 shl 1] ushr pow10     // = 5^n
+        val q1 = hi63 / d
+        val r1 = hi63 % d
+        val mid = (r1 shl k) or loK
+        val q0 = mid / d
+        val r0 = mid % d
+
+        val qLo = (q1 shl k) + q0
+        val qHi = q1 ushr (14 + pow10)
+        val remainder = (r0 shl pow10) or b
+
+        quotLongs[0] = qHi
+        quotLongs[1] = qLo
+        return remainder
+    }
+
+    // ------------------------------------------------------------------
+    // Residue -- how much was discarded, relative to half a ulp
+    // ------------------------------------------------------------------
+
+    /**
+     * Classify a single discarded decimal digit (0..9) as [EXACT],
+     * [LT_HALF], [HALF], or [GT_HALF] via lookup in [DIGIT_MAP].
+     */
+    private fun residueFromDecimalDigit(digit: Int): Int = (DIGIT_MAP shr (digit shl 1)) and 0x03
+
+    /**
+     * Combine a primary [roundResidue] with a [stickyResidue] from
+     * less-significant digits, in the **round-bit-and-sticky-bit** style.
+     * The sticky residue is collapsed to a single "nonzero" bit and OR'd
+     * into the low bit of the round residue.
+     */
+    private fun residueMerge(roundResidue: Int, stickyResidue: Int): Int {
+        val s = (stickyResidue and 1) or (stickyResidue ushr 1)
+        val r = (roundResidue or s) and 0x03
+        return r
+    }
+
+    /**
+     * Classify a 128-bit unsigned value relative to half of `10^pow10`,
+     * returning one of [EXACT], [LT_HALF], [HALF], or [GT_HALF].
+     *
+     * Used in the underflow boundary case where the entire coefficient is
+     * being discarded by truncation: the residue is determined by where
+     * the coefficient falls relative to half-of-the-truncation-divisor.
+     *
+     * Looks up `10^pow10` in the [POW10] table, halves it via a 128-bit
+     * shift right by 1, and compares against the input as an unsigned
+     * 128-bit value.
+     */
+    private fun residueFromValuePow10(dw1: Long, dw0: Long, pow10: Int): Int {
+        if ((dw1 or dw0) == 0L)
+            return EXACT
+        val pow10Index = pow10 shl 1
+        val pow10Hi = POW10[pow10Index + 1]
+        val pow10Lo = POW10[pow10Index]
+
+        val halfHi = pow10Hi ushr 1
+        val halfLo = (pow10Hi shl 63) or (pow10Lo ushr 1)
+        verify { dw1 >= 0 && halfHi >= 0 }
+        if (dw1 != halfHi) {
+            return if (dw1 < halfHi) LT_HALF else GT_HALF
+        }
+        if (dw0 != halfLo)
+            return if (unsignedLT(dw0, halfLo)) LT_HALF else GT_HALF
+        return HALF
+    }
+
+    /**
+     * Divide a 128-bit unsigned coefficient by `10^precisionTruncationNeeded`,
+     * returning the quotient via [out] and the round-and-sticky
+     * residue class as the return value. Truncates in chunks of up to 9
+     * digits via [u113DivModPow10Max9].
+     */
+    private fun u128ScaleDownPow10(out: LongArray, dw1: Long, dw0: Long, precisionTruncationNeeded: Int): Int {
+        verify { (dw1 or dw0) != 0L }
+        verify { precisionTruncationNeeded > 0 && precisionTruncationNeeded < calcDigitLen128(dw1, dw0) }
+        var scaleResidue = EXACT
+        var dw1T = dw1
+        var dw0T = dw0
+        var digitsRemaining = precisionTruncationNeeded
+        do {
+            val stepPow10 = min(digitsRemaining, 9)
+            val rem = u113DivModPow10Max9(out, dw1T, dw0T, stepPow10)
+            dw1T = out[0]
+            dw0T = out[1]
+            val stepResidue = residueFromValuePow10(0L, rem, stepPow10)
+            scaleResidue = residueMerge(stepResidue, scaleResidue)
+            digitsRemaining -= stepPow10
+        } while (digitsRemaining > 0)
+        return scaleResidue
+    }
+
+    // ------------------------------------------------------------------
+    // DPD declet conversion
+    // ------------------------------------------------------------------
+
+    /**
+     * Decode a 10-bit DPD declet (bits 9..0) into `0..999`.
+     *
+     * Mapping: bit9..bit0 as `p q r s t u v w x y`. Accepts the 24
+     * non-canonical declets as well as the 1000 canonical ones, per
+     * Cowlishaw's dpd2bcd.
+     */
+    private fun dpdDecodeDeclet(declet: Long): Long {
+        verify { declet in 0..1023 }
+
+        if (declet == 0L)
+            return 0L
+
+        // Unpack to bits p..y
+        val p = (declet ushr 9) and 1
+        val q = (declet ushr 8) and 1
+        val r = (declet ushr 7) and 1
+        val s = (declet ushr 6) and 1
+        val t = (declet ushr 5) and 1
+        val u = (declet ushr 4) and 1
+        val v = (declet ushr 3) and 1
+        val w = (declet ushr 2) and 1
+        val x = (declet ushr 1) and 1
+        val y = declet and 1
+
+        val ns = s xor 1
+        val nx = x xor 1
+        val nv = v xor 1
+        val nw = w xor 1
+        val nt = t xor 1
+
+        val a = (v and w) and (ns or t or nx)
+        val b = p and (nv or nw or (s and t.inv() and x))
+        val c = q and (nv or nw or (s and t.inv() and x))
+        val d = r
+
+        val e = v and ((nw and x) or (t.inv() and x) or (s and x))
+        val f = (s and (nv or nx)) or (p and ns and t and v and w and x)
+        val g = (t and (nv or nx)) or (q and ns and t and w)
+        val h = u
+
+        val i = v and ((nw and nx) or (w and x and (s or t)))
+        val j = ((nv and w)
+                or (s and v and nw and x)
+                or (p and w and (nx or (ns and t.inv()))))
+        val k = (nv and x) or (t and nw and x) or (q and v and w and (nx or (ns and nt)))
+        val m = y
+
+        // Pack BCD digit bits → three digits
+        val d2 = (a shl 3) or (b shl 2) or (c shl 1) or d
+        val d1 = (e shl 3) or (f shl 2) or (g shl 1) or h
+        val d0 = (i shl 3) or (j shl 2) or (k shl 1) or m
+
+
+        return d2 * 100 + d1 * 10 + d0
+    }
+
+    /**
+     * Encode `0..999` into a 10-bit DPD declet, per Cowlishaw's bcd2dpd.
+     *
+     * The inverse of [dpdDecodeDeclet] over canonical declets. Non-canonical
+     * declets decode to a value that re-encodes to the canonical declet for
+     * that value, so encode(decode(x)) == x only for canonical x.
+     */
+    private fun dpdEncodeDeclet(n: Long): Long {
+        verify { n in 0..999 }
+
+        if (n == 0L)
+            return 0L
+
+        // reciprocal-multiply digit extraction (optimized for n <= 999)
+        val q10 = (n * 205) ushr 11      // n / 10
+        val q100 = (n * 41) ushr 12      // n / 100
+
+        val d2 = q100
+        val d1 = q10 - (q100 * 10)
+        val d0 = n - (q10 * 10)
+
+        // BCD bits (MSB→LSB: 8,4,2,1)
+        val a = (d2 shr 3) and 1
+        val b = (d2 shr 2) and 1
+        val c = (d2 shr 1) and 1
+        val d = d2 and 1
+
+        val e = (d1 shr 3) and 1
+        val f = (d1 shr 2) and 1
+        val g = (d1 shr 1) and 1
+        val h = d1 and 1
+
+        val i = (d0 shr 3) and 1
+        val j = (d0 shr 2) and 1
+        val k = (d0 shr 1) and 1
+        val m = d0 and 1
+
+        val na = a xor 1
+        val ne = e xor 1
+        val ni = i xor 1
+
+        val p = b or ((a and j) or ((a and f) and i))
+        val q = c or ((a and k) or ((a and g) and i))
+        val r = d
+        val s = (f and (na or ni)) or ((na and (e and j)) or (e and i))
+        val t = g or ((na and (e and k)) or (a and i))
+        val u = h
+        val v = a or (e or i)
+        val w = a or ((e and i) or (ne and j))
+        val x = e or ((a and i) or (na and k))
+        val y = m
+
+        return (p shl 9) or (q shl 8) or (r shl 7) or (s shl 6) or
+                (t shl 5) or (u shl 4) or (v shl 3) or (w shl 2) or
+                (x shl 1) or y
+    }
+
+    /**
+     * Decode up to seven packed DPD declets into a binary integer.
+     *
+     * Declets are ten bits each, least significant first. The topmost may be
+     * narrower than ten bits, which is how the coefficient's leading digit is
+     * carried: 0..9 encodes to itself as a declet.
+     */
+    private fun binFromDeclets(declets: Long): Long {
+        var bin = 0L
+        var rest = declets
+        var multiplier = 1L
+        while (rest != 0L) {
+            bin += dpdDecodeDeclet(rest and 0x3FFL) * multiplier
+            // The last iteration multiplies past 10^18 and the product is never
+            // used, since rest is zero by then, so the wrap is harmless.
+            multiplier *= 1000L
+            rest = rest ushr 10
+        }
+        return bin
+    }
+
+    /**
+     * Encode a binary integer of at most 18 digits into six packed declets,
+     * least significant first. The inverse of [binFromDeclets] over that range.
+     */
+    private fun decletsFromBin(bin: Long): Long {
+        verify { bin >= 0L && bin < TEN_POW_18 }
+        var rest = bin
+        var declets = 0L
+        var shift = 0
+        while (rest != 0L) {
+            // reciprocal-multiply divide by 1000
+            val q = mulhi64(rest, 0x020C49BA5E353F7DL) ushr 3
+            declets = declets or (dpdEncodeDeclet(rest - (q * 1000L)) shl shift)
+            shift += 10
+            rest = q
+        }
+        return declets
+    }
+
+    // ------------------------------------------------------------------
+    // Rendering integers into ASCII
+    // ------------------------------------------------------------------
+
+    /**
+     * Render exactly 8 decimal digits of [dw] into [ascii], ending at
+     * `offMaxx`. Caller must ensure `dw < 10^8`; the function pads with
+     * leading zeros if `dw` has fewer than 8 significant digits.
+     *
+     * Implemented as a binary cascade: `÷ 10^4` once to split into two
+     * 4-digit halves, then `÷ 10^2` twice to split each half into two
+     * 2-digit pairs, then `÷ 10` four times to extract individual digits.
+     * The 8 byte stores at the end are independent and benefit from a
+     * hoisted bounds check that lets the JIT elide per-store checks.
+     *
+     * Always writes exactly 8 bytes at offsets `offMaxx - 8` through
+     * `offMaxx - 1`. Throws [IndexOutOfBoundsException] if those offsets
+     * are not within [ascii].
+     */
+    private fun render8DigitsBeforeIndex(dw: Long, ascii: ByteArray, offMaxx: Int) {
+        val abcd = mulhi64(dw, M_U64_DIV_1E4) ushr S_U64_DIV_1E4
+        val efgh = dw - (abcd * 10000L)
+
+        val ab = (abcd * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
+        val cd = abcd - (ab * 100L)
+
+        val ef = (efgh * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
+        val gh = efgh - (ef * 100L)
+
+        val a = (ab * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+        val b = ab - (a * 10L)
+
+        val c = (cd * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+        val d = cd - (c * 10L)
+
+        val e = (ef * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+        val f = ef - (e * 10L)
+
+        val g = (gh * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+        val h = gh - (g * 10L)
+
+        // Explicit bounds check to enable elimination of individual checks
+        val offMin = offMaxx - 8
+        if (offMin >= 0 && offMaxx <= ascii.size) {
+            ascii[offMaxx - 8] = (a.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 7] = (b.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 6] = (c.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 5] = (d.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 4] = (e.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 3] = (f.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 2] = (g.toInt() + '0'.code).toByte()
+            ascii[offMaxx - 1] = (h.toInt() + '0'.code).toByte()
+        } else {
+            throw IndexOutOfBoundsException()
+        }
+    }
+
+    /**
+     * Render exactly [renderDigitCount] decimal digits of [dw] into [ascii],
+     * ending at `offMaxx`. Pads with leading zeros if `dw` has fewer
+     * significant digits than `renderDigitCount`.
+     *
+     * Two phases:
+     *
+     *  1. While at least 4 digits remain: peel 4 digits per iteration
+     *     via `÷ 10^4` followed by a 2-digit / 1-digit cascade. Hoisted
+     *     bounds check enables bounds check elimination within the
+     *     iteration.
+     *
+     *  2. For the remaining 0–3 digits: peel one digit at a time via
+     *     `÷ 10` thru reciprocal multiplication.
+     *
+     * Always writes exactly `renderDigitCount` bytes at offsets
+     * `offMaxx - renderDigitCount` through `offMaxx - 1`.
+     *
+     * @throws IllegalArgumentException if the 4-digit phase would write
+     *         outside [ascii]
+     */
+    private fun renderTailDigitsBeforeIndex(renderDigitCount: Int, dw: Long, ascii: ByteArray, offMaxx: Int) {
+        var t = dw
+        var remainingDigitCount = renderDigitCount
+        var ib = offMaxx
+        while (remainingDigitCount >= 4) {
+            val t0 = mulhi64(t, M_U64_DIV_1E4) ushr S_U64_DIV_1E4
+            val abcd = t - (t0 * 10000L)
+            t = t0
+            val ab = (abcd * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
+            val cd = abcd - (ab * 100L)
+            val a = (ab * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+            val b = ab - (a * 10L)
+            val c = (cd * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+            val d = cd - (c * 10L)
+            if (ib - 4 >= 0 && ib <= ascii.size) {
+                ascii[ib - 4] = (a.toInt() + '0'.code).toByte()
+                ascii[ib - 3] = (b.toInt() + '0'.code).toByte()
+                ascii[ib - 2] = (c.toInt() + '0'.code).toByte()
+                ascii[ib - 1] = (d.toInt() + '0'.code).toByte()
+                ib -= 4
+                remainingDigitCount -= 4
+            } else {
+                throw IllegalArgumentException()
+            }
+        }
+        while (remainingDigitCount > 0) {
+            val divTen = (t * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
+            val digit = (t - (divTen * 10L)).toInt()
+            ascii[--ib] = ('0'.code + digit).toByte()
+            t = divTen
+            --remainingDigitCount
+        }
+        verify { offMaxx - ib == renderDigitCount }
+    }
+
+    // -- encode from String --------------------------------------------------------
+
+    /**
+     * Render a 128-bit unsigned integer as `digitPrintCount` decimal digits
+     * into [ascii], ending at offset `off + digitPrintCount`.
+     *
+     * Three phases:
+     *
+     *  1. While `dw1T != 0`: peel 8 digits per outer iteration via three
+     *     `÷ 10^8` divisions on rotating 96-bit chunks, using
+     *     [mulhi64] for the high half of each multi-word divide.
+     *
+     *  2. Once the value fits in 64 bits: peel 8 digits at a time via a
+     *     single `÷ 10^8` per iteration.
+     *
+     *  3. For 1–7 leftover digits: delegate to [renderTailDigitsBeforeIndex].
+     *
+     * Each 8-digit chunk is rendered by [render8DigitsBeforeIndex]. The
+     * caller must have allocated a buffer with at least
+     * `off + digitPrintCount` bytes, and is responsible for any leading-zero
+     * padding outside the rendered range.
+     *
+     * @return `digitPrintCount`, unchanged from the input
+     */
+    private fun u128ToAscii(
+        digitPrintCount: Int, dw1: Long, dw0: Long,
+        ascii: ByteArray, off: Int
+    ): Int {
+        var dw1T = dw1
+        var dw0T = dw0
+        var ich = off + digitPrintCount
+        var remainingDigitCount = digitPrintCount
+        while (dw1T != 0L) {
+            val q2 = mulhi64(dw1T, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
+            val r2 = dw1T - (q2 * 1_0000_0000L)
+            val s2 = (r2 shl 32) or (dw0T ushr 32)
+            val q1 = mulhi64(s2, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
+            val r1 = s2 - (q1 * 1_0000_0000L)
+            val s1 = (r1 shl 32) or (dw0T and MASK32L)
+            val q0 = mulhi64(s1, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
+            val r0 = s1 - (q0 * 1_0000_0000L)
+            dw0T = (q1 shl 32) + q0
+            dw1T = q2
+            render8DigitsBeforeIndex(r0, ascii, ich)
+            ich -= 8
+            remainingDigitCount -= 8
+        }
+        while (remainingDigitCount >= 8) {
+            val t0 = mulhi64(dw0T, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
+            val r0 = dw0T - (t0 * 1_0000_0000L)
+            dw0T = t0
+            render8DigitsBeforeIndex(r0, ascii, ich)
+            ich -= 8
+            remainingDigitCount -= 8
+        }
+        if (remainingDigitCount > 0)
+            renderTailDigitsBeforeIndex(remainingDigitCount, dw0T, ascii, ich)
+        return digitPrintCount
+    }
+
+    /**
+     * Write a signed decimal exponent at [off], returning its length. The
+     * magnitude never exceeds 6176, so it is at most four digits.
+     */
+    private fun appendInt(out: ByteArray, off: Int, v: Int): Int {
+        var signLen = 0
+        var magnitude = v
+        if (v < 0) {
+            out[off] = ascii_minus
+            signLen = 1
+            magnitude = -v
+        }
+        val digitLen = when {
+            magnitude >= 1000 -> 4
+            magnitude >= 100 -> 3
+            magnitude >= 10 -> 2
+            else -> 1
+        }
+        renderTailDigitsBeforeIndex(digitLen, magnitude.toLong(), out, off + signLen + digitLen)
+        return signLen + digitLen
+    }
+
+    // ------------------------------------------------------------------
+    // Rendering a decoded value
+    // ------------------------------------------------------------------
+
+    private fun infAscii(out: ByteArray, sign: Boolean): Int {
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the 'I' when unsigned
+        INFINITY_TEXT.copyInto(out, signLen)
+        return signLen + INFINITY_TEXT.size
+    }
+
+    private fun nanAscii(
+        out: ByteArray, sign: Boolean, isSignaling: Boolean,
+        payloadHi: Long, payloadLo: Long
+    ): Int {
+        val signLen = if (sign) 1 else 0
+        val sLen = if (isSignaling) 1 else 0
+        val wordOff = signLen + sLen
+        val baseLen = wordOff + NAN_TEXT.size
+        out[0] = ascii_minus   // overwritten by the 's' or the 'N' when unsigned
+        out[signLen] = ascii_s // overwritten by the 'N' when quiet
+        NAN_TEXT.copyInto(out, wordOff)
+        if ((payloadHi or payloadLo) == 0L ||
+            // non canonical IEEE 754-2019 3.5.2 c) 2)
+            unsignedLT(MAX_PAYLOAD_HI, payloadHi) ||
+            payloadHi == MAX_PAYLOAD_HI && unsignedLT(MAX_PAYLOAD_LO, payloadLo)
+        )
+            return baseLen
+        val digitLen = calcDigitLen128(payloadHi, payloadLo)
+        u128ToAscii(digitLen, payloadHi, payloadLo, out, baseLen)
+        return baseLen + digitLen
+    }
+
+    private fun zerAscii(out: ByteArray, sign: Boolean, qExp: Int): Int {
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the '0' when unsigned
+        if (qExp <= 0 && qExp >= -6) {
+            val k = -qExp
+            val zeroLen = if (k == 0) 1 else k + 2
+            PLAIN_ZERO.copyInto(out, signLen, 0, zeroLen)
+            return signLen + zeroLen
+        }
+        // A positive exponent needs an explicit '+'; a negative one prints its
+        // own '-' from appendInt. Write the '+' unconditionally and let
+        // appendInt land on top of it when qExp < 0 -- the same discipline
+        // as the leading sign, pointed the other way. It is correct only
+        // because appendInt emits a '-' for a negative value and emits
+        // nothing for a positive one, and because the plain form above has
+        // already taken every qExp in [-6, 0], so this branch never sees zero.
+        val plusLen = if (qExp > 0) 1 else 0
+        val baseLen = signLen + ZERO_EXP_TEXT.size + plusLen
+        ZERO_EXP_TEXT.copyInto(out, signLen)
+        out[signLen + ZERO_EXP_TEXT.size] = ascii_plus // overwritten by the '-' when qExp < 0
+        return baseLen + appendInt(out, baseLen, qExp)
+    }
+
+    private fun fnzToIntegerAscii(out: ByteArray, sign: Boolean, digitLen: Int, dw1: Long, dw0: Long): Int {
+        verify { digitLen > 0 }
+        val signLen = if (sign) 1 else 0
+        out[0] = ascii_minus // overwritten by the first digit when unsigned
+        u128ToAscii(digitLen, dw1, dw0, out, signLen)
+        return signLen + digitLen
+    }
+
+    private fun fnzToDecimalPointAscii(
+        out: ByteArray, sign: Boolean, qExp: Int,
+        digitLen: Int, dw1: Long, dw0: Long
+    ): Int {
+        val digitsRightOfDecimal = -qExp
+        val leadingZeroCount = max(1 + digitsRightOfDecimal - digitLen, 0)
+        val signLen = if (sign) 1 else 0
+        val decimalPointLen = 1
+        val totalLen = signLen + leadingZeroCount + decimalPointLen + digitLen
+        out[0] = ascii_minus
+        for (i in signLen..leadingZeroCount) // there is one extra here
+            out[i] = ascii_0
+        u128ToAscii(digitLen, dw1, dw0, out, signLen + leadingZeroCount)
+        for (i in totalLen - 1 downTo totalLen - digitsRightOfDecimal)
+            out[i] = out[i - 1]
+        out[totalLen - digitsRightOfDecimal - 1] = ascii_dot
+        return totalLen
+    }
+
+    private fun fnzToNormalizedScientificAscii(
+        out: ByteArray, sign: Boolean, qExp: Int,
+        digitLen: Int, dw1: Long, dw0: Long
+    ): Int {
+        verify { digitLen > 0 }
+        val eExp = qExp + (digitLen - 1)
+        val eExpAbs = (eExp xor (eExp shr 31)) - (eExp shr 31)
+        val signLen = if (sign) 1 else 0
+        val decimalPointLen = if (digitLen > 1) 1 else 0
+        val expELen = 1
+        val expSignLen = 1
+        val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
+        val expDigitLen = when {
+            eExpAbs >= 1000 -> 4
+            eExpAbs >= 100 -> 3
+            eExpAbs >= 10 -> 2
+            else -> 1
+        }
+        val totalLen = signLen + decimalPointLen + digitLen + expELen + expSignLen + expDigitLen
+        out[0] = ascii_minus
+        u128ToAscii(digitLen, dw1, dw0, out, signLen + decimalPointLen)
+        if (decimalPointLen > 0) {
+            out[signLen] = out[signLen + 1]
+            out[signLen + 1] = ascii_dot
+        }
+        val iE = signLen + decimalPointLen + digitLen
+        out[iE] = ascii_E
+        out[iE + 1] = expSignByte
+        renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), out, totalLen)
+        return totalLen
+    }
+
+    private fun fnzAscii(out: ByteArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long): Int {
+        val digitLen = calcDigitLen128(dw1, dw0)
+        val eExp = qExp + (digitLen - 1)
+        if (qExp == 0)
+            return fnzToIntegerAscii(out, sign, digitLen, dw1, dw0)
+        if (qExp <= 0 && eExp >= -6)
+            return fnzToDecimalPointAscii(out, sign, qExp, digitLen, dw1, dw0)
+        return fnzToNormalizedScientificAscii(out, sign, qExp, digitLen, dw1, dw0)
+    }
+
+    // ------------------------------------------------------------------
+    // bits -> text
+    // ------------------------------------------------------------------
 
     /* ----------------------------------------------------------------------
      * Rendering into the caller's buffer
@@ -462,7 +1337,6 @@ object Decimal128TextCodec {
      * not wanted. The one exception is a TRAILING '+' in the exponent-form
      * zero, noted where it happens.
      * -------------------------------------------------------------------- */
-
     /**
      * Render a BID128 encoding into the caller's buffer.
      *
@@ -637,549 +1511,87 @@ object Decimal128TextCodec {
         return fnzAscii(out, sign, qExp, dw1, dw0)
     }
 
-    private val INFINITY_TEXT = "Infinity".encodeToByteArray()
-    private val NAN_TEXT = "NaN".encodeToByteArray()
-    private val ZERO_EXP_TEXT = "0E".encodeToByteArray()
+    // ------------------------------------------------------------------
+    // Packing a finalized value into an encoding
+    // ------------------------------------------------------------------
 
     /**
-     * Every plain-form zero is a prefix of this literal. `k = -qExp` is the
-     * count of zeros after the radix point, so `k == 0` renders `"0"` with no
-     * radix point at all and `k >= 1` renders `"0."` followed by `k` zeros --
-     * lengths 1 and `k + 2`.
+     * Pack the sign, biased quantum exponent, and 113-bit coefficient into
+     * the BID128 encoding stored in [out].
+     *
+     * Always uses the short-form encoding (combination field top bits not
+     * `11`), which is correct for any canonical coefficient whose top 3
+     * bits fit in 0..7.
+     *
+     * Preconditions are checked via [verify] and active under compile-time
+     * control: the exponent must be in [-6176, 6111] and the coefficient
+     * must have at most 34 decimal digits.
      */
-    private val PLAIN_ZERO = "0.000000".encodeToByteArray()
-
-    private fun infAscii(out: ByteArray, sign: Boolean): Int {
-        val signLen = if (sign) 1 else 0
-        out[0] = ascii_minus // overwritten by the 'I' when unsigned
-        INFINITY_TEXT.copyInto(out, signLen)
-        return signLen + INFINITY_TEXT.size
-    }
-
-    private fun nanAscii(
-        out: ByteArray, sign: Boolean, isSignaling: Boolean,
-        payloadHi: Long, payloadLo: Long
-    ): Int {
-        val signLen = if (sign) 1 else 0
-        val sLen = if (isSignaling) 1 else 0
-        val wordOff = signLen + sLen
-        val baseLen = wordOff + NAN_TEXT.size
-        out[0] = ascii_minus   // overwritten by the 's' or the 'N' when unsigned
-        out[signLen] = ascii_s // overwritten by the 'N' when quiet
-        NAN_TEXT.copyInto(out, wordOff)
-        if ((payloadHi or payloadLo) == 0L ||
-            // non canonical IEEE 754-2019 3.5.2 c) 2)
-            unsignedLT(MAX_PAYLOAD_HI, payloadHi) ||
-            payloadHi == MAX_PAYLOAD_HI && unsignedLT(MAX_PAYLOAD_LO, payloadLo)
-        )
-            return baseLen
-        val digitLen = calcDigitLen128(payloadHi, payloadLo)
-        u128ToAscii(digitLen, payloadHi, payloadLo, out, baseLen)
-        return baseLen + digitLen
-    }
-
-    private fun zerAscii(out: ByteArray, sign: Boolean, qExp: Int): Int {
-        val signLen = if (sign) 1 else 0
-        out[0] = ascii_minus // overwritten by the '0' when unsigned
-        if (qExp <= 0 && qExp >= -6) {
-            val k = -qExp
-            val zeroLen = if (k == 0) 1 else k + 2
-            PLAIN_ZERO.copyInto(out, signLen, 0, zeroLen)
-            return signLen + zeroLen
-        }
-        // A positive exponent needs an explicit '+'; a negative one prints its
-        // own '-' from appendInt. Write the '+' unconditionally and let
-        // appendInt land on top of it when qExp < 0 -- the same discipline
-        // as the leading sign, pointed the other way. It is correct only
-        // because appendInt emits a '-' for a negative value and emits
-        // nothing for a positive one, and because the plain form above has
-        // already taken every qExp in [-6, 0], so this branch never sees zero.
-        val plusLen = if (qExp > 0) 1 else 0
-        val baseLen = signLen + ZERO_EXP_TEXT.size + plusLen
-        ZERO_EXP_TEXT.copyInto(out, signLen)
-        out[signLen + ZERO_EXP_TEXT.size] = ascii_plus // overwritten by the '-' when qExp < 0
-        return baseLen + appendInt(out, baseLen, qExp)
+    private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+        verify { qExp >= Q_MIN && qExp <= Q_MAX }
+        verify { calcDigitLen128(dw1, dw0) <= 34 }
+        val qBiased = qExp + BIAS
+        val s = if (sign) SIGN_BIT else 0L
+        val g = qBiased.toLong() shl (3 + 46)
+        out[0] = s or g or dw1
+        out[1] = dw0
     }
 
     /**
-     * Write a signed decimal exponent at [off], returning its length. The
-     * magnitude never exceeds 6176, so it is at most four digits.
+     * Pack a finite value into DPD128. The peer of [bid128SetFinite]: same
+     * inputs, same sign bit, same 14-bit biased exponent, and a coefficient
+     * of the same 34 digits -- laid out as a leading digit carried in the
+     * combination field plus eleven declets.
+     *
+     * The leading digit cannot be packed independently of the exponent: DPD
+     * puts it in the same five-bit prefix as the exponent's top two bits, so
+     * unlike BID there is no shared "pack sign and exponent" step to factor out.
+     *
+     * [out] doubles as scratch for the two divisions before it is written.
      */
-    private fun appendInt(out: ByteArray, off: Int, v: Int): Int {
-        var signLen = 0
-        var magnitude = v
-        if (v < 0) {
-            out[off] = ascii_minus
-            signLen = 1
-            magnitude = -v
-        }
-        val digitLen = when {
-            magnitude >= 1000 -> 4
-            magnitude >= 100 -> 3
-            magnitude >= 10 -> 2
-            else -> 1
-        }
-        renderTailDigitsBeforeIndex(digitLen, magnitude.toLong(), out, off + signLen + digitLen)
-        return signLen + digitLen
-    }
+    private fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+        verify { qExp >= Q_MIN && qExp <= Q_MAX }
+        verify { calcDigitLen128(dw1, dw0) <= 34 }
 
-    private fun fnzAscii(out: ByteArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long): Int {
-        val digitLen = calcDigitLen128(dw1, dw0)
-        val eExp = qExp + (digitLen - 1)
-        if (qExp == 0)
-            return fnzToIntegerAscii(out, sign, digitLen, dw1, dw0)
-        if (qExp <= 0 && eExp >= -6)
-            return fnzToDecimalPointAscii(out, sign, qExp, digitLen, dw1, dw0)
-        return fnzToNormalizedScientificAscii(out, sign, qExp, digitLen, dw1, dw0)
-    }
+        // Split the coefficient into its low 18 digits and its high 16.
+        // Two divisions by 10^9 rather than one by 10^18, so the existing
+        // 128-bit kernel does the work and no wider machinery is needed.
+        val r1 = u113DivModPow10Max9(out, dw1, dw0, 9)
+        val r2 = u113DivModPow10Max9(out, out[0], out[1], 9)
+        val binLo = (r2 * 1_000_000_000L) + r1
+        verify { out[0] == 0L } // the high 16 digits fit in one word
+        val binHi = out[1]
 
-    private fun fnzToIntegerAscii(out: ByteArray, sign: Boolean, digitLen: Int, dw1: Long, dw0: Long): Int {
-        verify { digitLen > 0 }
-        val signLen = if (sign) 1 else 0
-        out[0] = ascii_minus // overwritten by the first digit when unsigned
-        u128ToAscii(digitLen, dw1, dw0, out, signLen)
-        return signLen + digitLen
-    }
+        // the top digit rides in the combination field; the other 15 are declets
+        val d0 = binHi / TEN_POW_15
+        val declets5Hi = decletsFromBin(binHi - (d0 * TEN_POW_15))
+        val declets6Lo = decletsFromBin(binLo)
+        verify { d0 in 0L..9L }
 
-    private fun fnzToDecimalPointAscii(
-        out: ByteArray, sign: Boolean, qExp: Int,
-        digitLen: Int, dw1: Long, dw0: Long
-    ): Int {
-        val digitsRightOfDecimal = -qExp
-        val leadingZeroCount = max(1 + digitsRightOfDecimal - digitLen, 0)
-        val signLen = if (sign) 1 else 0
-        val decimalPointLen = 1
-        val totalLen = signLen + leadingZeroCount + decimalPointLen + digitLen
-        out[0] = ascii_minus
-        for (i in signLen..leadingZeroCount) // there is one extra here
-            out[i] = ascii_0
-        u128ToAscii(digitLen, dw1, dw0, out, signLen + leadingZeroCount)
-        for (i in totalLen - 1 downTo totalLen - digitsRightOfDecimal)
-            out[i] = out[i - 1]
-        out[totalLen - digitsRightOfDecimal - 1] = ascii_dot
-        return totalLen
-    }
+        val biasedQExp = qExp + BIAS
+        val expMSB = (biasedQExp shr 12) and 0x3
+        val expLSB = biasedQExp and 0x0FFF
+        val gPrefix =
+            if (d0 <= 7L) (expMSB shl 3) or d0.toInt()          // G0G1 = exponent MSBs
+            else 0b11000 or (expMSB shl 1) or (d0.toInt() and 1) // G0G1 = 11, digit is 8 or 9
+        val signCombo = ((if (sign) 1 else 0) shl W5) or (gPrefix shl 12) or expLSB
 
-    private fun fnzToNormalizedScientificAscii(
-        out: ByteArray, sign: Boolean, qExp: Int,
-        digitLen: Int, dw1: Long, dw0: Long
-    ): Int {
-        verify { digitLen > 0 }
-        val eExp = qExp + (digitLen - 1)
-        val eExpAbs = (eExp xor (eExp shr 31)) - (eExp shr 31)
-        val signLen = if (sign) 1 else 0
-        val decimalPointLen = if (digitLen > 1) 1 else 0
-        val expELen = 1
-        val expSignLen = 1
-        val expSignByte = if (eExp < 0) ascii_minus else ascii_plus
-        val expDigitLen = when {
-            eExpAbs >= 1000 -> 4
-            eExpAbs >= 100 -> 3
-            eExpAbs >= 10 -> 2
-            else -> 1
-        }
-        val totalLen = signLen + decimalPointLen + digitLen + expELen + expSignLen + expDigitLen
-        out[0] = ascii_minus
-        u128ToAscii(digitLen, dw1, dw0, out, signLen + decimalPointLen)
-        if (decimalPointLen > 0) {
-            out[signLen] = out[signLen + 1]
-            out[signLen + 1] = ascii_dot
-        }
-        val iE = signLen + decimalPointLen + digitLen
-        out[iE] = ascii_E
-        out[iE + 1] = expSignByte
-        renderTailDigitsBeforeIndex(expDigitLen, eExpAbs.toLong(), out, totalLen)
-        return totalLen
-    }
-
-    // ------- render an integer -------------------------------------------
-
-    /**
-     * Reciprocal-multiplication constants for unsigned `÷ 10^8` on a 64-bit
-     * dividend, exact for all non-negative inputs.
-     *
-     * Compute `n / 10^8` as `mulhi64(n, M_U64_DIV_1E8) ushr S_U64_DIV_1E8`.
-     * The `S_U64_DIV_1E8` shift is "+ 64 high" because `mulhi64` already
-     * returns the upper 64 bits of the 128-bit product; the named shift
-     * combines with that to give the effective magic-number divide.
-     */
-    private const val M_U64_DIV_1E8 = Long.MIN_VALUE or 0x2BCC77118461CEFDL // -6067343680855748867
-    private const val S_U64_DIV_1E8 = 26 // + 64 high
-
-    private const val MASK32L = 0x0000_0000_FFFF_FFFFL
-
-    /**
-     * Render a 128-bit unsigned integer as `digitPrintCount` decimal digits
-     * into [ascii], ending at offset `off + digitPrintCount`.
-     *
-     * Three phases:
-     *
-     *  1. While `dw1T != 0`: peel 8 digits per outer iteration via three
-     *     `÷ 10^8` divisions on rotating 96-bit chunks, using
-     *     [mulhi64] for the high half of each multi-word divide.
-     *
-     *  2. Once the value fits in 64 bits: peel 8 digits at a time via a
-     *     single `÷ 10^8` per iteration.
-     *
-     *  3. For 1–7 leftover digits: delegate to [renderTailDigitsBeforeIndex].
-     *
-     * Each 8-digit chunk is rendered by [render8DigitsBeforeIndex]. The
-     * caller must have allocated a buffer with at least
-     * `off + digitPrintCount` bytes, and is responsible for any leading-zero
-     * padding outside the rendered range.
-     *
-     * @return `digitPrintCount`, unchanged from the input
-     */
-    private fun u128ToAscii(
-        digitPrintCount: Int, dw1: Long, dw0: Long,
-        ascii: ByteArray, off: Int
-    ): Int {
-        var dw1T = dw1
-        var dw0T = dw0
-        var ich = off + digitPrintCount
-        var remainingDigitCount = digitPrintCount
-        while (dw1T != 0L) {
-            val q2 = mulhi64(dw1T, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
-            val r2 = dw1T - (q2 * 1_0000_0000L)
-            val s2 = (r2 shl 32) or (dw0T ushr 32)
-            val q1 = mulhi64(s2, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
-            val r1 = s2 - (q1 * 1_0000_0000L)
-            val s1 = (r1 shl 32) or (dw0T and MASK32L)
-            val q0 = mulhi64(s1, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
-            val r0 = s1 - (q0 * 1_0000_0000L)
-            dw0T = (q1 shl 32) + q0
-            dw1T = q2
-            render8DigitsBeforeIndex(r0, ascii, ich)
-            ich -= 8
-            remainingDigitCount -= 8
-        }
-        while (remainingDigitCount >= 8) {
-            val t0 = mulhi64(dw0T, M_U64_DIV_1E8) ushr S_U64_DIV_1E8
-            val r0 = dw0T - (t0 * 1_0000_0000L)
-            dw0T = t0
-            render8DigitsBeforeIndex(r0, ascii, ich)
-            ich -= 8
-            remainingDigitCount -= 8
-        }
-        if (remainingDigitCount > 0)
-            renderTailDigitsBeforeIndex(remainingDigitCount, dw0T, ascii, ich)
-        return digitPrintCount
+        out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
+        out[1] = (declets5Hi shl 60) or declets6Lo
     }
 
     /**
-     * Reciprocal-multiplication constants for unsigned division by small
-     * powers of 10 on 32-bit dividends.
-     *
-     * `M_U32_DIV_1E1` / `S_U32_DIV_1E1`: divide by 10, valid for
-     * dividends up to 2^32 - 1.
-     *
-     * `M_U32_DIV_1E2`: divide by 100, same range.
-     *
-     * `M_U64_DIV_1E4`: divide by 10000 on 64-bit dividends. Used to split
-     * an 8-digit value into two 4-digit halves.
+     * Pack a finite value into whichever interchange format the caller asked
+     * for. BID and DPD are peers: both carry the same sign, the same 14-bit
+     * biased exponent and the same 34-digit coefficient, and differ only in
+     * how that coefficient is laid out. Everything upstream of this point --
+     * rounding, clamping and the underflow region -- is format-neutral.
      */
-    private const val M_U32_DIV_1E1 = 0xCCCCCCCDL
-    private const val S_U32_DIV_1E1 = 35
-
-    private const val M_U32_DIV_1E2 = 0x51EB851FL
-    private const val S_U32_DIV_1E2 = 37
-
-    private const val M_U64_DIV_1E4 = 0x346DC5D63886594BL
-    private const val S_U64_DIV_1E4 = 11 // + 64 high
-
-    /**
-     * Render exactly 8 decimal digits of [dw] into [ascii], ending at
-     * `offMaxx`. Caller must ensure `dw < 10^8`; the function pads with
-     * leading zeros if `dw` has fewer than 8 significant digits.
-     *
-     * Implemented as a binary cascade: `÷ 10^4` once to split into two
-     * 4-digit halves, then `÷ 10^2` twice to split each half into two
-     * 2-digit pairs, then `÷ 10` four times to extract individual digits.
-     * The 8 byte stores at the end are independent and benefit from a
-     * hoisted bounds check that lets the JIT elide per-store checks.
-     *
-     * Always writes exactly 8 bytes at offsets `offMaxx - 8` through
-     * `offMaxx - 1`. Throws [IndexOutOfBoundsException] if those offsets
-     * are not within [ascii].
-     */
-    private fun render8DigitsBeforeIndex(dw: Long, ascii: ByteArray, offMaxx: Int) {
-        val abcd = mulhi64(dw, M_U64_DIV_1E4) ushr S_U64_DIV_1E4
-        val efgh = dw - (abcd * 10000L)
-
-        val ab = (abcd * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
-        val cd = abcd - (ab * 100L)
-
-        val ef = (efgh * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
-        val gh = efgh - (ef * 100L)
-
-        val a = (ab * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-        val b = ab - (a * 10L)
-
-        val c = (cd * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-        val d = cd - (c * 10L)
-
-        val e = (ef * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-        val f = ef - (e * 10L)
-
-        val g = (gh * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-        val h = gh - (g * 10L)
-
-        // Explicit bounds check to enable elimination of individual checks
-        val offMin = offMaxx - 8
-        if (offMin >= 0 && offMaxx <= ascii.size) {
-            ascii[offMaxx - 8] = (a.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 7] = (b.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 6] = (c.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 5] = (d.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 4] = (e.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 3] = (f.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 2] = (g.toInt() + '0'.code).toByte()
-            ascii[offMaxx - 1] = (h.toInt() + '0'.code).toByte()
-        } else {
-            throw IndexOutOfBoundsException()
-        }
-    }
-
-    /**
-     * Render exactly [renderDigitCount] decimal digits of [dw] into [ascii],
-     * ending at `offMaxx`. Pads with leading zeros if `dw` has fewer
-     * significant digits than `renderDigitCount`.
-     *
-     * Two phases:
-     *
-     *  1. While at least 4 digits remain: peel 4 digits per iteration
-     *     via `÷ 10^4` followed by a 2-digit / 1-digit cascade. Hoisted
-     *     bounds check enables bounds check elimination within the
-     *     iteration.
-     *
-     *  2. For the remaining 0–3 digits: peel one digit at a time via
-     *     `÷ 10` thru reciprocal multiplication.
-     *
-     * Always writes exactly `renderDigitCount` bytes at offsets
-     * `offMaxx - renderDigitCount` through `offMaxx - 1`.
-     *
-     * @throws IllegalArgumentException if the 4-digit phase would write
-     *         outside [ascii]
-     */
-    private fun renderTailDigitsBeforeIndex(renderDigitCount: Int, dw: Long, ascii: ByteArray, offMaxx: Int) {
-        var t = dw
-        var remainingDigitCount = renderDigitCount
-        var ib = offMaxx
-        while (remainingDigitCount >= 4) {
-            val t0 = mulhi64(t, M_U64_DIV_1E4) ushr S_U64_DIV_1E4
-            val abcd = t - (t0 * 10000L)
-            t = t0
-            val ab = (abcd * M_U32_DIV_1E2) ushr S_U32_DIV_1E2
-            val cd = abcd - (ab * 100L)
-            val a = (ab * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-            val b = ab - (a * 10L)
-            val c = (cd * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-            val d = cd - (c * 10L)
-            if (ib - 4 >= 0 && ib <= ascii.size) {
-                ascii[ib - 4] = (a.toInt() + '0'.code).toByte()
-                ascii[ib - 3] = (b.toInt() + '0'.code).toByte()
-                ascii[ib - 2] = (c.toInt() + '0'.code).toByte()
-                ascii[ib - 1] = (d.toInt() + '0'.code).toByte()
-                ib -= 4
-                remainingDigitCount -= 4
-            } else {
-                throw IllegalArgumentException()
-            }
-        }
-        while (remainingDigitCount > 0) {
-            val divTen = (t * M_U32_DIV_1E1) ushr S_U32_DIV_1E1
-            val digit = (t - (divTen * 10L)).toInt()
-            ascii[--ib] = ('0'.code + digit).toByte()
-            t = divTen
-            --remainingDigitCount
-        }
-        verify { offMaxx - ib == renderDigitCount }
-    }
-
-    // -- encode from String --------------------------------------------------------
-
-    /**
-     * The code of the character at [index], or -1 past the end of the string.
-     * The parsers walk the input as character codes, so end-of-input is one
-     * more code value rather than a bound test at every read. -1 is not a
-     * character, which keeps NUL an ordinary input character -- and an
-     * invalid one -- instead of doubling as the terminator.
-     */
-    private inline fun codeAt(str: String, index: Int): Int = if (index >= 0 && index < str.length) str[index].code else -1
-
-    /**
-     * The digit test, spelled out once. Kotlin's `Char.isDigit` is Unicode-aware
-     * and has no counterpart on the `Int` the reader yields.
-     */
-    private inline fun isDigit(ch: Int): Boolean = ch >= '0'.code && ch <= '9'.code
-
-    /**
-     * Top-level dispatcher for parsing a decimal character sequence into an
-     * encoding. Reads optional sign, then dispatches by leading character
-     * to the finite-value, infinity, or NaN parser.
-     *
-     * The leading character is also passed through to the dispatched
-     * parser so it doesn't have to re-read what the dispatcher already
-     * consumed.
-     *
-     * @return `null` on success (with `out` populated), or a
-     *         human-readable error string on failure
-     */
-    private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
-        var pos = 0
-        val chFirst = codeAt(str, pos++)
-        var ch = chFirst
-        val sign = ch == '-'.code
-        if (ch == '+'.code || ch == '-'.code)
-            ch = codeAt(str, pos++)
-        if (isDigit(ch) || ch == '.'.code)
-            return parseFiniteValueText(out, formatIsBid, sign, ch, str, pos)
-        val chLower = ch or 0x20
-        if (chLower == 'i'.code)
-            return parseInfinityText(out, sign, ch, str, pos)
-        if (chLower == 'n'.code || chLower == 's'.code || chLower == 'q'.code)
-            return parseNanText(out, formatIsBid, sign, ch, str, pos)
-        if (chFirst == -1)
-            return "EMPTY_STRING"
-        return "INVALID_FORMAT"
-    }
-
-    /**
-     * Parse the keyword `Infinity` (or its 3-letter abbreviation `Inf`),
-     * case-insensitively, and write the corresponding encoding into [out].
-     * Returns an error string for any other input.
-     */
-    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
-        var pos = startPos
-        var ch = chFirst
-        var chPrevCode = 0
-        val target = "infinity"
-        for (i in 0 until 8) {
-            val targetCode = target[i].code
-            if (ch or 0x20 != targetCode) {
-                if (ch == -1)
-                    break
-                else
-                    return "FAILURE_PARSING_INFINITY"
-            }
-            chPrevCode = ch or 0x20
-            ch = codeAt(str, pos++)
-        }
-        if (ch != -1 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
-            return "FAILURE_PARSING_INFINITY"
-        out[0] = INF_PATTERN_HI or if (sign) SIGN_BIT else 0L
-        out[1] = 0L
-        return null
-    }
-
-    /**
-     * Parse `NaN`, `qNaN`, or `sNaN` (case-insensitive) with an optional
-     * decimal payload, and write the corresponding encoding into [out].
-     * Payloads of 34+ digits AS WRITTEN are non-canonical and produce a
-     * zero payload per IEEE 754-2019 §3.5.2.
-     *
-     * The payload may be written bare (`NaN123`) or enclosed in parentheses
-     * (`NaN(123)`). The parenthesised form is positional and balanced: the
-     * `(` must follow the word immediately, at least one digit must appear,
-     * and the `)` must be the last character of the input. So `NaN(1)2(3)`,
-     * `NaN(1`, `NaN(1]` and `NaN()` are all rejected, and `NaN[1]` / `NaN{1}`
-     * are not this form at all.
-     *
-     * The reason this spelling exists at all
-     * is that the platform's own `strtod` reads
-     * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
-     * platform itself. The resemblance stops at the parentheses -- strtod's
-     * sequence is letters, digits and underscores read as an
-     * implementation-defined integer (`NAN(abc)` and `NAN(0x1c8)` are legal
-     * there), while a decimal128 payload is decimal digits. This is a
-     * paren-tolerant spelling of our own payload syntax, not strtod's.
-     *
-     * The legacy base skipped `(`, `)`, `[`, `]`, `{` and `}` ANYWHERE, so it
-     * read `NaN(1)2(3)` as payload 123. That is not this, and stays rejected.
-     */
-    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
-        var pos = startPos
-        var ch = chFirst
-        val hasS = (ch or 0x20) == 's'.code
-        val hasQ = (ch or 0x20) == 'q'.code
-        if (hasQ or hasS)
-            ch = codeAt(str, pos++)
-        if (((ch or 0x20) != 'n'.code) ||
-            ((codeAt(str, pos++) or 0x20) != 'a'.code) ||
-            ((codeAt(str, pos++) or 0x20) != 'n'.code)
-        )
-            return "FAILURE_PARSING_NAN"
-        var payloadDw0 = 0L
-        var payloadDw1 = 0L
-        ch = codeAt(str, pos++)
-        val hasParen = ch == '('.code
-        if (hasParen)
-            ch = codeAt(str, pos++)
-        if (hasParen || ch != -1) {
-            var accumDigitCount = 0
-            var accum19a = 0L
-            var accum19b = 0L
-            while (isDigit(ch)) {
-                val d = ch - '0'.code
-                // Count every digit written, leading zeros included. The
-                // 33-digit limit below is a limit on the payload as spelled,
-                // not on its significant digits, so "NaN" followed by forty
-                // zeros and a one is over the limit and reads as zero.
-                // Leading zeros contribute nothing to the accumulators, so
-                // the value of a payload within the limit is unaffected.
-                ++accumDigitCount
-                if (accumDigitCount <= 19)
-                    accum19a = (accum19a * 10L) + d.toLong()
-                else
-                    accum19b = (accum19b * 10L) + d.toLong()
-                ch = codeAt(str, pos++)
-            }
-            if (accumDigitCount == 0)
-                return if (hasParen) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
-            if (hasParen) {
-                // the ')' must be present and must end the input
-                if (ch != ')'.code)
-                    return if (ch == -1) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
-                if (codeAt(str, pos++) != -1)
-                    return "FAILURE_PARSING_NAN"
-            } else if (ch != -1) {
-                return "FAILURE_PARSING_NAN"
-            }
-            if (accumDigitCount > 33) {
-                // IEEE754-2019 3.5.2 Encodings
-                //  ... as the payload of a NaN). If the value exceeds the maximum,
-                //  the significand c is non-canonical and the value used for c is zero.
-                payloadDw0 = 0
-                payloadDw1 = 0
-            } else {
-                payloadDw0 = accum19a
-                payloadDw1 = 0L
-                if (accumDigitCount > 19) {
-                    val pow10 = accumDigitCount - 19
-                    u128FmaPow10(out, accum19a, pow10, accum19b)
-                    payloadDw1 = out[0]
-                    payloadDw0 = out[1]
-                }
-            }
-        }
-        setNaN(out, formatIsBid, sign, hasS, payloadDw1, payloadDw0)
-        return null
-    }
-
-    /**
-     * Pack a NaN into whichever interchange format the caller asked for.
-     *
-     * A NaN payload is a coefficient, so the formats diverge here exactly as
-     * they do for finite values: BID keeps it as a binary integer, DPD as
-     * declets. Infinity by contrast has no coefficient, which is why it is
-     * byte-identical in both and needs no such split.
-     */
-    private fun setNaN(out: LongArray, formatIsBid: Boolean, sign: Boolean,
-                       isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
+    private fun setFinite(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
         if (formatIsBid)
-            bid128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+            bid128SetFinite(out, sign, qExp, dw1, dw0)
         else
-            dpd128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+            dpd128SetFinite(out, sign, qExp, dw1, dw0)
     }
 
     private fun bid128SetNaN(out: LongArray, sign: Boolean,
@@ -1214,6 +1626,328 @@ object Decimal128TextCodec {
         out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
         out[1] = (declets5Hi shl 60) or declets6Lo
     }
+
+    /**
+     * Pack a NaN into whichever interchange format the caller asked for.
+     *
+     * A NaN payload is a coefficient, so the formats diverge here exactly as
+     * they do for finite values: BID keeps it as a binary integer, DPD as
+     * declets. Infinity by contrast has no coefficient, which is why it is
+     * byte-identical in both and needs no such split.
+     */
+    private fun setNaN(out: LongArray, formatIsBid: Boolean, sign: Boolean,
+                       isSignaling: Boolean, payloadDw1: Long, payloadDw0: Long) {
+        if (formatIsBid)
+            bid128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+        else
+            dpd128SetNaN(out, sign, isSignaling, payloadDw1, payloadDw0)
+    }
+
+    // ------------------------------------------------------------------
+    // Finalize: rounding, clamping, underflow
+    // ------------------------------------------------------------------
+
+    /**
+     * Encode `Infinity` (or `-Infinity`) into [out].
+     */
+    private fun finalizeOverflow(out: LongArray, sign: Boolean) {
+        out[0] = (if (sign) SIGN_BIT else 0L) or INF_PATTERN_HI
+        out[1] = 0L
+    }
+
+    /**
+     * Test whether a coefficient/exponent pair fits as a canonical
+     * encoding: exponent in [-6176, 6111] and coefficient in [0, 10^34).
+     *
+     * Fast path uses the leading-zero bit count of the high word to
+     * cheaply confirm the coefficient has at most 113 bits, in which case
+     * it is necessarily less than 10^34 (since 2^113 > 10^34). Slow path
+     * compares against the precomputed POW10[34] constant.
+     */
+    private inline fun coeffQExpFit(dw1: Long, dw0: Long, qExp: Int): Boolean {
+        if (qExp < Q_MIN || qExp > Q_MAX)
+            return false
+        if (dw1.countLeadingZeroBits() > K_WIDTH - 113)
+            return true
+        val pow10Offset = 34 shl 1
+        val maxxHi = POW10[pow10Offset + 1]
+        return unsignedLT(dw1, maxxHi) || dw1 == maxxHi && unsignedLT(dw0, POW10[pow10Offset])
+    }
+
+    /**
+     * Encode a finite value whose natural quantum exponent exceeds qMax
+     * (6111) but whose coefficient has enough leading capacity to absorb
+     * the excess.
+     *
+     * Multiplies the coefficient by 10^qExcess (where qExcess is qExp
+     * minus 6111), reducing the exponent to exactly 6111. This preserves
+     * the value while bringing the encoding into representable range.
+     *
+     * Caller must have verified that the coefficient has enough room
+     * (digitLen + qExcess <= 34); this function asserts the invariant
+     * and produces the clamped encoding.
+     */
+    private fun finalizeClamping(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
+        val qExcess = qExp - Q_MAX
+        verify { qExcess > 0 && qExcess <= 34 - calcDigitLen128(dw1, dw0) }
+        val pow10Offset = qExcess shl 1
+        val y1 = POW10[pow10Offset + 1]
+        val y0 = POW10[pow10Offset]
+        val pp00Hi = mulhi64(dw0, y0)
+        val pp00Lo = dw0 * y0
+        val pp10Lo = dw1 * y0
+        val pp01Lo = dw0 * y1
+        val dw0Scaled = pp00Lo
+        val dw1Scaled = pp00Hi + pp10Lo + pp01Lo
+        verify { coeffQExpFit(dw1Scaled, dw0Scaled, Q_MAX) }
+        setFinite(out, formatIsBid, sign, Q_MAX, dw1Scaled, dw0Scaled)
+    }
+
+    /**
+     * Handle the underflow boundary case where the most-significant digit
+     * of the coefficient sits exactly one position to the right of the
+     * representable range.
+     *
+     * The coefficient value itself determines rounding: comparing the
+     * coefficient against `(10^digitLen) / 2` yields the residue class.
+     * Combined with any incoming residue, this drives a `roundTiesToEven`
+     * decision between zero (always even, the default outcome) and 1 ulp
+     * (the smallest subnormal, only when total residue is GT_HALF).
+     */
+    private fun finalizeUnderflowBoundary(
+        out: LongArray, formatIsBid: Boolean, sign: Boolean,
+        dw1: Long, dw0: Long, residueIn: Int
+    ) {
+        val digitLen = calcDigitLen128(dw1, dw0)
+        verify { digitLen != 0 }
+        val scaleResidue = residueFromValuePow10(dw1, dw0, digitLen)
+        val totalResidue = residueMerge(scaleResidue, residueIn)
+        // roundTiesToEven ...
+        // only if we are GT_HALF since otherwise the result is 0 ... which is even
+        setFinite(out, formatIsBid, sign, Q_MIN, 0L, if (totalResidue == GT_HALF) 1L else 0L)
+    }
+
+    private fun finalizeSubnormal(
+        out: LongArray, formatIsBid: Boolean, sign: Boolean, qExpIn: Int,
+        dw1In: Long, dw0In: Long, residueIn: Int
+    ) {
+        val truncationNeeded = Q_MIN - qExpIn
+        verify { truncationNeeded > 0 && truncationNeeded < calcDigitLen128(dw1In, dw0In) }
+
+        val scaleResidue = u128ScaleDownPow10(out, dw1In, dw0In, truncationNeeded)
+        val totalResidue = residueMerge(scaleResidue, residueIn)
+        var dw1T = out[0]
+        var dw0T = out[1]
+        var qExpT = Q_MIN
+
+        val roundUp =
+            totalResidue == GT_HALF || totalResidue == HALF && (dw0T and 1L) != 0L
+        if (roundUp) {
+            // apply rounding
+            ++dw0T
+            dw1T += if (dw0T == 0L) 1L else 0L
+            if (dw1T == MAXX_COEFF_34_HI && dw0T == MAXX_COEFF_34_LO) {
+                dw1T = MIN_PRECISION_34_COEFF_HI
+                dw0T = MIN_PRECISION_34_COEFF_LO
+                ++qExpT
+            }
+        }
+        setFinite(out, formatIsBid, sign, qExpT, dw1T, dw0T)
+    }
+
+    /**
+     * Dispatch underflow handling for a value whose exponent is below
+     * Emin (-6176). Three cases:
+     *
+     *  - Truncation needed exceeds the digit count: result is zero
+     *    (the value is below half the smallest subnormal).
+     *  - Truncation equals the digit count: boundary case where the
+     *    leading digit of the coefficient determines rounding.
+     *  - Truncation is less than the digit count: representable as a
+     *    subnormal; some precision is preserved, with rounding.
+     */
+    private fun finalizeUnderflowRegion(
+        out: LongArray,
+        formatIsBid: Boolean,
+        sign: Boolean,
+        qExp: Int,
+        dw1: Long,
+        dw0: Long,
+        residue: Int
+    ) {
+        // IEEE 754-2019 7.5 Underflow -- the subnormal region
+        verify { qExp < Q_MIN }
+        val truncationNeeded = Q_MIN - qExp
+        val digitLen = calcDigitLen128(dw1, dw0)
+        verify { digitLen <= 34 }
+        when {
+            truncationNeeded > digitLen -> {
+                // Result is swamped - becomes zero with roundTiesToEven
+                // This is always inexact
+                roundAndFinalizeFinite(out, formatIsBid, sign, Q_MIN, 0L, 0L, LT_HALF)
+            }
+
+            truncationNeeded == digitLen ->
+                finalizeUnderflowBoundary(out, formatIsBid, sign, dw1, dw0, residue)
+
+            else ->
+                finalizeSubnormal(out, formatIsBid, sign, qExp, dw1, dw0, residue)
+        }
+    }
+
+    /**
+     * Round and finalize a finite parsed coefficient/exponent
+     * pair into the encoding stored in [out].
+     *
+     * Implements `roundTiesToEven` rounding with full handling of the
+     * decimal128 boundary conditions: oversized coefficient, underflow to
+     * subnormal or zero, overflow to infinity, and the clamped-near-Emax
+     * region where a finite value with too-large quantum exponent can be
+     * representable by absorbing the excess into the coefficient.
+     *
+     * Step 1 (fast path): if the input already fits within precision and
+     * range and no rounding is required (residue ≤ LT_HALF, or HALF with
+     * an even retained low bit), encode and return immediately.
+     * This picks up the vast majority of cases.
+     *
+     * Step 2 (zero coefficient): zeros that are out of qExp range get
+     * clamped to the valid range.
+     *
+     * -Step 3 (special values): Not applicable here — special values
+     * are handled by callers before reaching this function.
+     *
+     * Step 4 (underflow): if the exponent is below Emin, divert to
+     * [finalizeUnderflowRegion] for subnormal handling.
+     *
+     * Step 5 (precision truncation): REMOVED as unreachable from a codec's
+     * callers -- see the note in the body, which also states what would have
+     * to change for it to be needed again.
+     *
+     * Step 6 (rounding): apply `roundTiesToEven`. If rounding causes the
+     * coefficient to roll over to 10^34, normalize to 10^33 and increment
+     * the exponent.
+     *
+     * Step 7 (overflow / clamping): if the exponent exceeds Emax, either
+     * absorb the excess into the coefficient (clamping near Emax) or
+     * overflow to infinity.
+     */
+    private fun roundAndFinalizeFinite(
+        out: LongArray,
+        formatIsBid: Boolean,
+        sign: Boolean,
+        qExpIn: Int,
+        dw1In: Long,
+        dw0In: Long,
+        residueIn: Int
+    ) {
+        // Step 1: Fast path: already in valid decimal128 range ...
+        //         ... and no roundTiesToEven rounding
+        if (residueIn <= LT_HALF || residueIn == HALF && (dw0In and 1L) == 0L) {
+            if (coeffQExpFit(dw1In, dw0In, qExpIn)) {
+                setFinite(out, formatIsBid, sign, qExpIn, dw1In, dw0In)
+                return
+            }
+            // Step 2: zero coefficient with out-of-range qExp ... clamp qExp
+            if ((dw1In or dw0In) == 0L) {
+                val qClamped = max(min(qExpIn, Q_MAX), Q_MIN)
+                setFinite(out, formatIsBid, sign, qClamped, 0L, 0L)
+                return
+            }
+        }
+
+        // Step 3: special values ... not applicable ... only Finite
+
+        // Step 5 -- precision truncation -- IS NOT HERE, and this is the reason.
+        //
+        // This finalize chain descends from one built for an arithmetic engine,
+        // whose callers hand it coefficients wider than the 34-digit precision
+        // limit: multiply and FMA produce a double-width product, and the engine
+        // truncates it here, accumulating the discarded digits into the residue
+        // before rounding. A codec has no such caller.
+        //
+        // [parseFiniteValueText] accumulates at most 19 + 15 = 34 significant
+        // digits and turns every digit past them into a residue instead, so the
+        // coefficient it hands over is never wider than the limit. The only
+        // other entry to this function is the swamped branch of
+        // [finalizeUnderflowRegion], which passes a zero coefficient. So the
+        // truncation step is unreachable, and rather than carry a path that has
+        // never once executed -- and therefore has never been verified to work
+        // -- it is removed and the invariant is enforced.
+        //
+        // Measured: zero
+        // executions across the 87k-row shared corpus, 400,000 random
+        // numerals, and 76,280 finalize calls driven by inputs of up to 5,000
+        // digits, where the widest coefficient ever seen here was 34.
+        //
+        // This is `check`, not `verify`: it is unconditional, because a build
+        // with VERIFY_ENABLED off would otherwise fall through and encode an
+        // out-of-range coefficient silently. It cannot fire on a caller's data
+        // -- no input reaches it -- only on a future caller that breaks the
+        // invariant, which is exactly when a loud failure is wanted. A caller
+        // that is not a parser needs the truncation step back, as a multiply
+        // or an FMA would.
+        demand(calcDigitLen128(dw1In, dw0In) <= 34, "coefficient wider than precision")
+
+        // Step 4: underflow. With no precision truncation to outrank it, the
+        // test is simply whether the exponent is below the minimum.
+        if (qExpIn < Q_MIN) {
+            finalizeUnderflowRegion(out, formatIsBid, sign, qExpIn, dw1In, dw0In, residueIn)
+            return
+        }
+
+        var totalResidue = residueIn
+        var dw1 = dw1In
+        var dw0 = dw0In
+        var qExp = qExpIn
+
+        // step 6: rounding ... in this world only roundTiesToEven
+        val applyRounding = totalResidue == GT_HALF || totalResidue == HALF && (dw0 and 1L) != 0L
+        if (applyRounding) {
+            // step 6.1: increment
+            ++dw0
+            dw1 += if (dw0 == 0L) 1L else 0L
+
+            // step 6.2: rollover
+            if (dw1 == MAXX_COEFF_34_HI && dw0 == MAXX_COEFF_34_LO) {
+                dw1 = MIN_PRECISION_34_COEFF_HI
+                dw0 = MIN_PRECISION_34_COEFF_LO
+                ++qExp
+            }
+        }
+
+        // step 7: check final bounds
+        verify { qExp >= Q_MIN }
+        verify { calcDigitLen128(dw1, dw0) <= 34 }
+        if (qExp > Q_MAX) {
+            val qExcess = qExp - Q_MAX
+            val digitLen = calcDigitLen128(dw1, dw0)
+            if (digitLen + qExcess <= 34)
+                finalizeClamping(out, formatIsBid, sign, qExp, dw1, dw0)
+            else
+                finalizeOverflow(out, sign)
+            return
+        }
+        setFinite(out, formatIsBid, sign, qExp, dw1, dw0)
+    }
+
+    // ------------------------------------------------------------------
+    // text -> bits
+    // ------------------------------------------------------------------
+
+    /**
+     * The code of the character at [index], or -1 past the end of the string.
+     * The parsers walk the input as character codes, so end-of-input is one
+     * more code value rather than a bound test at every read. -1 is not a
+     * character, which keeps NUL an ordinary input character -- and an
+     * invalid one -- instead of doubling as the terminator.
+     */
+    private inline fun codeAt(str: String, index: Int): Int = if (index >= 0 && index < str.length) str[index].code else -1
+
+    /**
+     * The digit test, spelled out once. Kotlin's `Char.isDigit` is Unicode-aware
+     * and has no counterpart on the `Int` the reader yields.
+     */
+    private inline fun isDigit(ch: Int): Boolean = ch >= '0'.code && ch <= '9'.code
 
     /**
      * Parse a finite decimal numeral and write the corresponding
@@ -1372,819 +2106,156 @@ object Decimal128TextCodec {
     }
 
     /**
-     * Round and finalize a finite parsed coefficient/exponent
-     * pair into the encoding stored in [out].
-     *
-     * Implements `roundTiesToEven` rounding with full handling of the
-     * decimal128 boundary conditions: oversized coefficient, underflow to
-     * subnormal or zero, overflow to infinity, and the clamped-near-Emax
-     * region where a finite value with too-large quantum exponent can be
-     * representable by absorbing the excess into the coefficient.
-     *
-     * Step 1 (fast path): if the input already fits within precision and
-     * range and no rounding is required (residue ≤ LT_HALF, or HALF with
-     * an even retained low bit), encode and return immediately.
-     * This picks up the vast majority of cases.
-     *
-     * Step 2 (zero coefficient): zeros that are out of qExp range get
-     * clamped to the valid range.
-     *
-     * -Step 3 (special values): Not applicable here — special values
-     * are handled by callers before reaching this function.
-     *
-     * Step 4 (underflow): if the exponent is below Emin, divert to
-     * [finalizeUnderflowRegion] for subnormal handling.
-     *
-     * Step 5 (precision truncation): REMOVED as unreachable from a codec's
-     * callers -- see the note in the body, which also states what would have
-     * to change for it to be needed again.
-     *
-     * Step 6 (rounding): apply `roundTiesToEven`. If rounding causes the
-     * coefficient to roll over to 10^34, normalize to 10^33 and increment
-     * the exponent.
-     *
-     * Step 7 (overflow / clamping): if the exponent exceeds Emax, either
-     * absorb the excess into the coefficient (clamping near Emax) or
-     * overflow to infinity.
+     * Parse the keyword `Infinity` (or its 3-letter abbreviation `Inf`),
+     * case-insensitively, and write the corresponding encoding into [out].
+     * Returns an error string for any other input.
      */
-    private fun roundAndFinalizeFinite(
-        out: LongArray,
-        formatIsBid: Boolean,
-        sign: Boolean,
-        qExpIn: Int,
-        dw1In: Long,
-        dw0In: Long,
-        residueIn: Int
-    ) {
-        // Step 1: Fast path: already in valid decimal128 range ...
-        //         ... and no roundTiesToEven rounding
-        if (residueIn <= LT_HALF || residueIn == HALF && (dw0In and 1L) == 0L) {
-            if (coeffQExpFit(dw1In, dw0In, qExpIn)) {
-                setFinite(out, formatIsBid, sign, qExpIn, dw1In, dw0In)
-                return
+    private fun parseInfinityText(out: LongArray, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
+        var pos = startPos
+        var ch = chFirst
+        var chPrevCode = 0
+        val target = "infinity"
+        for (i in 0 until 8) {
+            val targetCode = target[i].code
+            if (ch or 0x20 != targetCode) {
+                if (ch == -1)
+                    break
+                else
+                    return "FAILURE_PARSING_INFINITY"
             }
-            // Step 2: zero coefficient with out-of-range qExp ... clamp qExp
-            if ((dw1In or dw0In) == 0L) {
-                val qClamped = max(min(qExpIn, Q_MAX), Q_MIN)
-                setFinite(out, formatIsBid, sign, qClamped, 0L, 0L)
-                return
-            }
+            chPrevCode = ch or 0x20
+            ch = codeAt(str, pos++)
         }
-
-        // Step 3: special values ... not applicable ... only Finite
-
-        // Step 5 -- precision truncation -- IS NOT HERE, and this is the reason.
-        //
-        // This finalize chain descends from one built for an arithmetic engine,
-        // whose callers hand it coefficients wider than the 34-digit precision
-        // limit: multiply and FMA produce a double-width product, and the engine
-        // truncates it here, accumulating the discarded digits into the residue
-        // before rounding. A codec has no such caller.
-        //
-        // [parseFiniteValueText] accumulates at most 19 + 15 = 34 significant
-        // digits and turns every digit past them into a residue instead, so the
-        // coefficient it hands over is never wider than the limit. The only
-        // other entry to this function is the swamped branch of
-        // [finalizeUnderflowRegion], which passes a zero coefficient. So the
-        // truncation step is unreachable, and rather than carry a path that has
-        // never once executed -- and therefore has never been verified to work
-        // -- it is removed and the invariant is enforced.
-        //
-        // Measured: zero
-        // executions across the 87k-row shared corpus, 400,000 random
-        // numerals, and 76,280 finalize calls driven by inputs of up to 5,000
-        // digits, where the widest coefficient ever seen here was 34.
-        //
-        // This is `check`, not `verify`: it is unconditional, because a build
-        // with VERIFY_ENABLED off would otherwise fall through and encode an
-        // out-of-range coefficient silently. It cannot fire on a caller's data
-        // -- no input reaches it -- only on a future caller that breaks the
-        // invariant, which is exactly when a loud failure is wanted. A caller
-        // that is not a parser needs the truncation step back, as a multiply
-        // or an FMA would.
-        demand(calcDigitLen128(dw1In, dw0In) <= 34, "coefficient wider than precision")
-
-        // Step 4: underflow. With no precision truncation to outrank it, the
-        // test is simply whether the exponent is below the minimum.
-        if (qExpIn < Q_MIN) {
-            finalizeUnderflowRegion(out, formatIsBid, sign, qExpIn, dw1In, dw0In, residueIn)
-            return
-        }
-
-        var totalResidue = residueIn
-        var dw1 = dw1In
-        var dw0 = dw0In
-        var qExp = qExpIn
-
-        // step 6: rounding ... in this world only roundTiesToEven
-        val applyRounding = totalResidue == GT_HALF || totalResidue == HALF && (dw0 and 1L) != 0L
-        if (applyRounding) {
-            // step 6.1: increment
-            ++dw0
-            dw1 += if (dw0 == 0L) 1L else 0L
-
-            // step 6.2: rollover
-            if (dw1 == MAXX_COEFF_34_HI && dw0 == MAXX_COEFF_34_LO) {
-                dw1 = MIN_PRECISION_34_COEFF_HI
-                dw0 = MIN_PRECISION_34_COEFF_LO
-                ++qExp
-            }
-        }
-
-        // step 7: check final bounds
-        verify { qExp >= Q_MIN }
-        verify { calcDigitLen128(dw1, dw0) <= 34 }
-        if (qExp > Q_MAX) {
-            val qExcess = qExp - Q_MAX
-            val digitLen = calcDigitLen128(dw1, dw0)
-            if (digitLen + qExcess <= 34)
-                finalizeClamping(out, formatIsBid, sign, qExp, dw1, dw0)
-            else
-                finalizeOverflow(out, sign)
-            return
-        }
-        setFinite(out, formatIsBid, sign, qExp, dw1, dw0)
-    }
-
-    /**
-     * Pack a finite value into whichever interchange format the caller asked
-     * for. BID and DPD are peers: both carry the same sign, the same 14-bit
-     * biased exponent and the same 34-digit coefficient, and differ only in
-     * how that coefficient is laid out. Everything upstream of this point --
-     * rounding, clamping and the underflow region -- is format-neutral.
-     */
-    private fun setFinite(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        if (formatIsBid)
-            bid128SetFinite(out, sign, qExp, dw1, dw0)
-        else
-            dpd128SetFinite(out, sign, qExp, dw1, dw0)
-    }
-
-    /**
-     * Pack a finite value into DPD128. The peer of [bid128SetFinite]: same
-     * inputs, same sign bit, same 14-bit biased exponent, and a coefficient
-     * of the same 34 digits -- laid out as a leading digit carried in the
-     * combination field plus eleven declets.
-     *
-     * The leading digit cannot be packed independently of the exponent: DPD
-     * puts it in the same five-bit prefix as the exponent's top two bits, so
-     * unlike BID there is no shared "pack sign and exponent" step to factor out.
-     *
-     * [out] doubles as scratch for the two divisions before it is written.
-     */
-    private fun dpd128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        verify { qExp >= Q_MIN && qExp <= Q_MAX }
-        verify { calcDigitLen128(dw1, dw0) <= 34 }
-
-        // Split the coefficient into its low 18 digits and its high 16.
-        // Two divisions by 10^9 rather than one by 10^18, so the existing
-        // 128-bit kernel does the work and no wider machinery is needed.
-        val r1 = u113DivModPow10Max9(out, dw1, dw0, 9)
-        val r2 = u113DivModPow10Max9(out, out[0], out[1], 9)
-        val binLo = (r2 * 1_000_000_000L) + r1
-        verify { out[0] == 0L } // the high 16 digits fit in one word
-        val binHi = out[1]
-
-        // the top digit rides in the combination field; the other 15 are declets
-        val d0 = binHi / TEN_POW_15
-        val declets5Hi = decletsFromBin(binHi - (d0 * TEN_POW_15))
-        val declets6Lo = decletsFromBin(binLo)
-        verify { d0 in 0L..9L }
-
-        val biasedQExp = qExp + BIAS
-        val expMSB = (biasedQExp shr 12) and 0x3
-        val expLSB = biasedQExp and 0x0FFF
-        val gPrefix =
-            if (d0 <= 7L) (expMSB shl 3) or d0.toInt()          // G0G1 = exponent MSBs
-            else 0b11000 or (expMSB shl 1) or (d0.toInt() and 1) // G0G1 = 11, digit is 8 or 9
-        val signCombo = ((if (sign) 1 else 0) shl W5) or (gPrefix shl 12) or expLSB
-
-        out[0] = (signCombo.toLong() shl 46) or (declets5Hi ushr 4)
-        out[1] = (declets5Hi shl 60) or declets6Lo
-    }
-
-    /**
-     * Pack the sign, biased quantum exponent, and 113-bit coefficient into
-     * the BID128 encoding stored in [out].
-     *
-     * Always uses the short-form encoding (combination field top bits not
-     * `11`), which is correct for any canonical coefficient whose top 3
-     * bits fit in 0..7.
-     *
-     * Preconditions are checked via [verify] and active under compile-time
-     * control: the exponent must be in [-6176, 6111] and the coefficient
-     * must have at most 34 decimal digits.
-     */
-    private fun bid128SetFinite(out: LongArray, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        verify { qExp >= Q_MIN && qExp <= Q_MAX }
-        verify { calcDigitLen128(dw1, dw0) <= 34 }
-        val qBiased = qExp + BIAS
-        val s = if (sign) SIGN_BIT else 0L
-        val g = qBiased.toLong() shl (3 + 46)
-        out[0] = s or g or dw1
-        out[1] = dw0
-    }
-
-    /**
-     * Encode `Infinity` (or `-Infinity`) into [out].
-     */
-    private fun finalizeOverflow(out: LongArray, sign: Boolean) {
-        out[0] = (if (sign) SIGN_BIT else 0L) or INF_PATTERN_HI
+        if (ch != -1 || (chPrevCode != 'f'.code && chPrevCode != 'y'.code))
+            return "FAILURE_PARSING_INFINITY"
+        out[0] = INF_PATTERN_HI or if (sign) SIGN_BIT else 0L
         out[1] = 0L
+        return null
     }
 
     /**
-     * Encode a finite value whose natural quantum exponent exceeds qMax
-     * (6111) but whose coefficient has enough leading capacity to absorb
-     * the excess.
+     * Parse `NaN`, `qNaN`, or `sNaN` (case-insensitive) with an optional
+     * decimal payload, and write the corresponding encoding into [out].
+     * Payloads of 34+ digits AS WRITTEN are non-canonical and produce a
+     * zero payload per IEEE 754-2019 §3.5.2.
      *
-     * Multiplies the coefficient by 10^qExcess (where qExcess is qExp
-     * minus 6111), reducing the exponent to exactly 6111. This preserves
-     * the value while bringing the encoding into representable range.
+     * The payload may be written bare (`NaN123`) or enclosed in parentheses
+     * (`NaN(123)`). The parenthesised form is positional and balanced: the
+     * `(` must follow the word immediately, at least one digit must appear,
+     * and the `)` must be the last character of the input. So `NaN(1)2(3)`,
+     * `NaN(1`, `NaN(1]` and `NaN()` are all rejected, and `NaN[1]` / `NaN{1}`
+     * are not this form at all.
      *
-     * Caller must have verified that the coefficient has enough room
-     * (digitLen + qExcess <= 34); this function asserts the invariant
-     * and produces the clamped encoding.
+     * The reason this spelling exists at all
+     * is that the platform's own `strtod` reads
+     * `NAN(n-char-sequence)`, so the spelling reaches a caller from the
+     * platform itself. The resemblance stops at the parentheses -- strtod's
+     * sequence is letters, digits and underscores read as an
+     * implementation-defined integer (`NAN(abc)` and `NAN(0x1c8)` are legal
+     * there), while a decimal128 payload is decimal digits. This is a
+     * paren-tolerant spelling of our own payload syntax, not strtod's.
+     *
+     * The legacy base skipped `(`, `)`, `[`, `]`, `{` and `}` ANYWHERE, so it
+     * read `NaN(1)2(3)` as payload 123. That is not this, and stays rejected.
      */
-    private fun finalizeClamping(out: LongArray, formatIsBid: Boolean, sign: Boolean, qExp: Int, dw1: Long, dw0: Long) {
-        val qExcess = qExp - Q_MAX
-        verify { qExcess > 0 && qExcess <= 34 - calcDigitLen128(dw1, dw0) }
-        val pow10Offset = qExcess shl 1
-        val y1 = POW10[pow10Offset + 1]
-        val y0 = POW10[pow10Offset]
-        val pp00Hi = mulhi64(dw0, y0)
-        val pp00Lo = dw0 * y0
-        val pp10Lo = dw1 * y0
-        val pp01Lo = dw0 * y1
-        val dw0Scaled = pp00Lo
-        val dw1Scaled = pp00Hi + pp10Lo + pp01Lo
-        verify { coeffQExpFit(dw1Scaled, dw0Scaled, Q_MAX) }
-        setFinite(out, formatIsBid, sign, Q_MAX, dw1Scaled, dw0Scaled)
-    }
-
-    /**
-     * Test whether a coefficient/exponent pair fits as a canonical
-     * encoding: exponent in [-6176, 6111] and coefficient in [0, 10^34).
-     *
-     * Fast path uses the leading-zero bit count of the high word to
-     * cheaply confirm the coefficient has at most 113 bits, in which case
-     * it is necessarily less than 10^34 (since 2^113 > 10^34). Slow path
-     * compares against the precomputed POW10[34] constant.
-     */
-    private inline fun coeffQExpFit(dw1: Long, dw0: Long, qExp: Int): Boolean {
-        if (qExp < Q_MIN || qExp > Q_MAX)
-            return false
-        if (dw1.countLeadingZeroBits() > K_WIDTH - 113)
-            return true
-        val pow10Offset = 34 shl 1
-        val maxxHi = POW10[pow10Offset + 1]
-        return unsignedLT(dw1, maxxHi) || dw1 == maxxHi && unsignedLT(dw0, POW10[pow10Offset])
-    }
-
-    /**
-     * Dispatch underflow handling for a value whose exponent is below
-     * Emin (-6176). Three cases:
-     *
-     *  - Truncation needed exceeds the digit count: result is zero
-     *    (the value is below half the smallest subnormal).
-     *  - Truncation equals the digit count: boundary case where the
-     *    leading digit of the coefficient determines rounding.
-     *  - Truncation is less than the digit count: representable as a
-     *    subnormal; some precision is preserved, with rounding.
-     */
-    private fun finalizeUnderflowRegion(
-        out: LongArray,
-        formatIsBid: Boolean,
-        sign: Boolean,
-        qExp: Int,
-        dw1: Long,
-        dw0: Long,
-        residue: Int
-    ) {
-        // IEEE 754-2019 7.5 Underflow -- the subnormal region
-        verify { qExp < Q_MIN }
-        val truncationNeeded = Q_MIN - qExp
-        val digitLen = calcDigitLen128(dw1, dw0)
-        verify { digitLen <= 34 }
-        when {
-            truncationNeeded > digitLen -> {
-                // Result is swamped - becomes zero with roundTiesToEven
-                // This is always inexact
-                roundAndFinalizeFinite(out, formatIsBid, sign, Q_MIN, 0L, 0L, LT_HALF)
+    private fun parseNanText(out: LongArray, formatIsBid: Boolean, sign: Boolean, chFirst: Int, str: String, startPos: Int): String? {
+        var pos = startPos
+        var ch = chFirst
+        val hasS = (ch or 0x20) == 's'.code
+        val hasQ = (ch or 0x20) == 'q'.code
+        if (hasQ or hasS)
+            ch = codeAt(str, pos++)
+        if (((ch or 0x20) != 'n'.code) ||
+            ((codeAt(str, pos++) or 0x20) != 'a'.code) ||
+            ((codeAt(str, pos++) or 0x20) != 'n'.code)
+        )
+            return "FAILURE_PARSING_NAN"
+        var payloadDw0 = 0L
+        var payloadDw1 = 0L
+        ch = codeAt(str, pos++)
+        val hasParen = ch == '('.code
+        if (hasParen)
+            ch = codeAt(str, pos++)
+        if (hasParen || ch != -1) {
+            var accumDigitCount = 0
+            var accum19a = 0L
+            var accum19b = 0L
+            while (isDigit(ch)) {
+                val d = ch - '0'.code
+                // Count every digit written, leading zeros included. The
+                // 33-digit limit below is a limit on the payload as spelled,
+                // not on its significant digits, so "NaN" followed by forty
+                // zeros and a one is over the limit and reads as zero.
+                // Leading zeros contribute nothing to the accumulators, so
+                // the value of a payload within the limit is unaffected.
+                ++accumDigitCount
+                if (accumDigitCount <= 19)
+                    accum19a = (accum19a * 10L) + d.toLong()
+                else
+                    accum19b = (accum19b * 10L) + d.toLong()
+                ch = codeAt(str, pos++)
             }
-
-            truncationNeeded == digitLen ->
-                finalizeUnderflowBoundary(out, formatIsBid, sign, dw1, dw0, residue)
-
-            else ->
-                finalizeSubnormal(out, formatIsBid, sign, qExp, dw1, dw0, residue)
-        }
-    }
-
-    /**
-     * Handle the underflow boundary case where the most-significant digit
-     * of the coefficient sits exactly one position to the right of the
-     * representable range.
-     *
-     * The coefficient value itself determines rounding: comparing the
-     * coefficient against `(10^digitLen) / 2` yields the residue class.
-     * Combined with any incoming residue, this drives a `roundTiesToEven`
-     * decision between zero (always even, the default outcome) and 1 ulp
-     * (the smallest subnormal, only when total residue is GT_HALF).
-     */
-    private fun finalizeUnderflowBoundary(
-        out: LongArray, formatIsBid: Boolean, sign: Boolean,
-        dw1: Long, dw0: Long, residueIn: Int
-    ) {
-        val digitLen = calcDigitLen128(dw1, dw0)
-        verify { digitLen != 0 }
-        val scaleResidue = residueFromValuePow10(dw1, dw0, digitLen)
-        val totalResidue = residueMerge(scaleResidue, residueIn)
-        // roundTiesToEven ...
-        // only if we are GT_HALF since otherwise the result is 0 ... which is even
-        setFinite(out, formatIsBid, sign, Q_MIN, 0L, if (totalResidue == GT_HALF) 1L else 0L)
-    }
-
-    private fun finalizeSubnormal(
-        out: LongArray, formatIsBid: Boolean, sign: Boolean, qExpIn: Int,
-        dw1In: Long, dw0In: Long, residueIn: Int
-    ) {
-        val truncationNeeded = Q_MIN - qExpIn
-        verify { truncationNeeded > 0 && truncationNeeded < calcDigitLen128(dw1In, dw0In) }
-
-        val scaleResidue = u128ScaleDownPow10(out, dw1In, dw0In, truncationNeeded)
-        val totalResidue = residueMerge(scaleResidue, residueIn)
-        var dw1T = out[0]
-        var dw0T = out[1]
-        var qExpT = Q_MIN
-
-        val roundUp =
-            totalResidue == GT_HALF || totalResidue == HALF && (dw0T and 1L) != 0L
-        if (roundUp) {
-            // apply rounding
-            ++dw0T
-            dw1T += if (dw0T == 0L) 1L else 0L
-            if (dw1T == MAXX_COEFF_34_HI && dw0T == MAXX_COEFF_34_LO) {
-                dw1T = MIN_PRECISION_34_COEFF_HI
-                dw0T = MIN_PRECISION_34_COEFF_LO
-                ++qExpT
+            if (accumDigitCount == 0)
+                return if (hasParen) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
+            if (hasParen) {
+                // the ')' must be present and must end the input
+                if (ch != ')'.code)
+                    return if (ch == -1) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
+                if (codeAt(str, pos++) != -1)
+                    return "FAILURE_PARSING_NAN"
+            } else if (ch != -1) {
+                return "FAILURE_PARSING_NAN"
+            }
+            if (accumDigitCount > 33) {
+                // IEEE754-2019 3.5.2 Encodings
+                //  ... as the payload of a NaN). If the value exceeds the maximum,
+                //  the significand c is non-canonical and the value used for c is zero.
+                payloadDw0 = 0
+                payloadDw1 = 0
+            } else {
+                payloadDw0 = accum19a
+                payloadDw1 = 0L
+                if (accumDigitCount > 19) {
+                    val pow10 = accumDigitCount - 19
+                    u128FmaPow10(out, accum19a, pow10, accum19b)
+                    payloadDw1 = out[0]
+                    payloadDw0 = out[1]
+                }
             }
         }
-        setFinite(out, formatIsBid, sign, qExpT, dw1T, dw0T)
-    }
-
-
-    /**
-     * Residue classification for rounding decisions.
-     *
-     * When discarding low-order digits during truncation to 34 significant
-     * digits, the discarded part falls into one of four categories relative
-     * to half a ulp of the retained value:
-     *
-     *  - [EXACT]   — discarded part is zero; no rounding needed
-     *  - [LT_HALF] — strictly less than half; round down (toward zero)
-     *  - [HALF]    — exactly half; tie-break per active rounding direction
-     *  - [GT_HALF] — strictly greater than half; round up (away from zero)
-     *
-     * For `roundTiesToEven`, [HALF] rounds to the nearest even retained
-     * digit; [LT_HALF] and [GT_HALF] are unambiguous; [EXACT] is a no-op.
-     */
-    private const val EXACT = 0
-    private const val LT_HALF = 1
-    private const val HALF = 2
-    private const val GT_HALF = 3
-
-    /**
-     * Lookup table mapping a discarded decimal digit (0..9) to its residue
-     * class. Two bits per digit, packed low-to-high:
-     *
-     *  - 0       → [EXACT]   (discarded digit is zero)
-     *  - 1..4    → [LT_HALF] (digit < 5)
-     *  - 5       → [HALF]    (digit is exactly 5)
-     *  - 6..9    → [GT_HALF] (digit > 5)
-     */
-    private const val DIGIT_MAP = 0b11_11_11_11_10_01_01_01_01_00
-
-    // ---- DPD declet conversion -------------------------------------------
-    //
-    // A declet is 10 bits holding three decimal digits, 0..999. This is the
-    // one place BID and DPD genuinely differ: BID stores the 34-digit
-    // coefficient as a binary integer, DPD stores it as a leading digit plus
-    // eleven declets.
-    //
-    // Both directions are pure boolean arithmetic (Cowlishaw's dpd2bcd and
-    // bcd2dpd) rather than lookup tables. Measured on this codebase, the
-    // arithmetic compiles to 2,814 bytes against 16,784 for the equivalent
-    // shortArrayOf tables -- the JVM has no array-literal constant, so a
-    // table becomes per-element initialisation bytecode -- and it allocates
-    // nothing at runtime, and behaves identically on every Kotlin target.
-
-    private const val TEN_POW_15 = 1_000_000_000_000_000L
-    private const val TEN_POW_18 = 1_000_000_000_000_000_000L
-
-    /**
-     * Decode up to seven packed DPD declets into a binary integer.
-     *
-     * Declets are ten bits each, least significant first. The topmost may be
-     * narrower than ten bits, which is how the coefficient's leading digit is
-     * carried: 0..9 encodes to itself as a declet.
-     */
-    private fun binFromDeclets(declets: Long): Long {
-        var bin = 0L
-        var rest = declets
-        var multiplier = 1L
-        while (rest != 0L) {
-            bin += dpdDecodeDeclet(rest and 0x3FFL) * multiplier
-            // The last iteration multiplies past 10^18 and the product is never
-            // used, since rest is zero by then, so the wrap is harmless.
-            multiplier *= 1000L
-            rest = rest ushr 10
-        }
-        return bin
+        setNaN(out, formatIsBid, sign, hasS, payloadDw1, payloadDw0)
+        return null
     }
 
     /**
-     * Encode a binary integer of at most 18 digits into six packed declets,
-     * least significant first. The inverse of [binFromDeclets] over that range.
-     */
-    private fun decletsFromBin(bin: Long): Long {
-        verify { bin >= 0L && bin < TEN_POW_18 }
-        var rest = bin
-        var declets = 0L
-        var shift = 0
-        while (rest != 0L) {
-            // reciprocal-multiply divide by 1000
-            val q = mulhi64(rest, 0x020C49BA5E353F7DL) ushr 3
-            declets = declets or (dpdEncodeDeclet(rest - (q * 1000L)) shl shift)
-            shift += 10
-            rest = q
-        }
-        return declets
-    }
-
-    /**
-     * Decode a 10-bit DPD declet (bits 9..0) into `0..999`.
+     * Top-level dispatcher for parsing a decimal character sequence into an
+     * encoding. Reads optional sign, then dispatches by leading character
+     * to the finite-value, infinity, or NaN parser.
      *
-     * Mapping: bit9..bit0 as `p q r s t u v w x y`. Accepts the 24
-     * non-canonical declets as well as the 1000 canonical ones, per
-     * Cowlishaw's dpd2bcd.
-     */
-    private fun dpdDecodeDeclet(declet: Long): Long {
-        verify { declet in 0..1023 }
-
-        if (declet == 0L)
-            return 0L
-
-        // Unpack to bits p..y
-        val p = (declet ushr 9) and 1
-        val q = (declet ushr 8) and 1
-        val r = (declet ushr 7) and 1
-        val s = (declet ushr 6) and 1
-        val t = (declet ushr 5) and 1
-        val u = (declet ushr 4) and 1
-        val v = (declet ushr 3) and 1
-        val w = (declet ushr 2) and 1
-        val x = (declet ushr 1) and 1
-        val y = declet and 1
-
-        val ns = s xor 1
-        val nx = x xor 1
-        val nv = v xor 1
-        val nw = w xor 1
-        val nt = t xor 1
-
-        val a = (v and w) and (ns or t or nx)
-        val b = p and (nv or nw or (s and t.inv() and x))
-        val c = q and (nv or nw or (s and t.inv() and x))
-        val d = r
-
-        val e = v and ((nw and x) or (t.inv() and x) or (s and x))
-        val f = (s and (nv or nx)) or (p and ns and t and v and w and x)
-        val g = (t and (nv or nx)) or (q and ns and t and w)
-        val h = u
-
-        val i = v and ((nw and nx) or (w and x and (s or t)))
-        val j = ((nv and w)
-                or (s and v and nw and x)
-                or (p and w and (nx or (ns and t.inv()))))
-        val k = (nv and x) or (t and nw and x) or (q and v and w and (nx or (ns and nt)))
-        val m = y
-
-        // Pack BCD digit bits → three digits
-        val d2 = (a shl 3) or (b shl 2) or (c shl 1) or d
-        val d1 = (e shl 3) or (f shl 2) or (g shl 1) or h
-        val d0 = (i shl 3) or (j shl 2) or (k shl 1) or m
-
-
-        return d2 * 100 + d1 * 10 + d0
-    }
-
-    /**
-     * Encode `0..999` into a 10-bit DPD declet, per Cowlishaw's bcd2dpd.
+     * The leading character is also passed through to the dispatched
+     * parser so it doesn't have to re-read what the dispatcher already
+     * consumed.
      *
-     * The inverse of [dpdDecodeDeclet] over canonical declets. Non-canonical
-     * declets decode to a value that re-encodes to the canonical declet for
-     * that value, so encode(decode(x)) == x only for canonical x.
+     * @return `null` on success (with `out` populated), or a
+     *         human-readable error string on failure
      */
-    private fun dpdEncodeDeclet(n: Long): Long {
-        verify { n in 0..999 }
-
-        if (n == 0L)
-            return 0L
-
-        // reciprocal-multiply digit extraction (optimized for n <= 999)
-        val q10 = (n * 205) ushr 11      // n / 10
-        val q100 = (n * 41) ushr 12      // n / 100
-
-        val d2 = q100
-        val d1 = q10 - (q100 * 10)
-        val d0 = n - (q10 * 10)
-
-        // BCD bits (MSB→LSB: 8,4,2,1)
-        val a = (d2 shr 3) and 1
-        val b = (d2 shr 2) and 1
-        val c = (d2 shr 1) and 1
-        val d = d2 and 1
-
-        val e = (d1 shr 3) and 1
-        val f = (d1 shr 2) and 1
-        val g = (d1 shr 1) and 1
-        val h = d1 and 1
-
-        val i = (d0 shr 3) and 1
-        val j = (d0 shr 2) and 1
-        val k = (d0 shr 1) and 1
-        val m = d0 and 1
-
-        val na = a xor 1
-        val ne = e xor 1
-        val ni = i xor 1
-
-        val p = b or ((a and j) or ((a and f) and i))
-        val q = c or ((a and k) or ((a and g) and i))
-        val r = d
-        val s = (f and (na or ni)) or ((na and (e and j)) or (e and i))
-        val t = g or ((na and (e and k)) or (a and i))
-        val u = h
-        val v = a or (e or i)
-        val w = a or ((e and i) or (ne and j))
-        val x = e or ((a and i) or (na and k))
-        val y = m
-
-        return (p shl 9) or (q shl 8) or (r shl 7) or (s shl 6) or
-                (t shl 5) or (u shl 4) or (v shl 3) or (w shl 2) or
-                (x shl 1) or y
-    }
-
-    /**
-     * Classify a single discarded decimal digit (0..9) as [EXACT],
-     * [LT_HALF], [HALF], or [GT_HALF] via lookup in [DIGIT_MAP].
-     */
-    private fun residueFromDecimalDigit(digit: Int): Int = (DIGIT_MAP shr (digit shl 1)) and 0x03
-
-    /**
-     * Combine a primary [roundResidue] with a [stickyResidue] from
-     * less-significant digits, in the **round-bit-and-sticky-bit** style.
-     * The sticky residue is collapsed to a single "nonzero" bit and OR'd
-     * into the low bit of the round residue.
-     */
-    private fun residueMerge(roundResidue: Int, stickyResidue: Int): Int {
-        val s = (stickyResidue and 1) or (stickyResidue ushr 1)
-        val r = (roundResidue or s) and 0x03
-        return r
-    }
-
-    /**
-     * Classify a 128-bit unsigned value relative to half of `10^pow10`,
-     * returning one of [EXACT], [LT_HALF], [HALF], or [GT_HALF].
-     *
-     * Used in the underflow boundary case where the entire coefficient is
-     * being discarded by truncation: the residue is determined by where
-     * the coefficient falls relative to half-of-the-truncation-divisor.
-     *
-     * Looks up `10^pow10` in the [POW10] table, halves it via a 128-bit
-     * shift right by 1, and compares against the input as an unsigned
-     * 128-bit value.
-     */
-    private fun residueFromValuePow10(dw1: Long, dw0: Long, pow10: Int): Int {
-        if ((dw1 or dw0) == 0L)
-            return EXACT
-        val pow10Index = pow10 shl 1
-        val pow10Hi = POW10[pow10Index + 1]
-        val pow10Lo = POW10[pow10Index]
-
-        val halfHi = pow10Hi ushr 1
-        val halfLo = (pow10Hi shl 63) or (pow10Lo ushr 1)
-        verify { dw1 >= 0 && halfHi >= 0 }
-        if (dw1 != halfHi) {
-            return if (dw1 < halfHi) LT_HALF else GT_HALF
-        }
-        if (dw0 != halfLo)
-            return if (unsignedLT(dw0, halfLo)) LT_HALF else GT_HALF
-        return HALF
-    }
-
-    /**
-     * Powers of 10 from `10^0` through `10^34` as 128-bit unsigned values
-     * in little-endian order: `POW10[2*i]` is the low 64 bits, `POW10[2*i + 1]`
-     * the high 64 bits, of `10^i`.
-     *
-     * Sized to the coefficient bound and indexed directly -- no mask, no
-     * padding. Every reachable index is at most 34: the binding case is
-     * [calcDigitLen128], whose input is always a coefficient or NaN payload
-     * below `10^34`, so `bitLen <= 113` and `(bitLen * 1233) ushr 12 <= 34`.
-     * It doubles as the `5^n` source for the divide kernel, since
-     * `10^n ushr n` is exactly `5^n`; there is no POW5 table.
-     */
-    private val POW10 = longArrayOf(
-        // little-endian order
-        1L, 0L,                            // 1 (0)
-        0x000000000000000AuL.toLong(), 0L, // 10 (10**1)
-        0x0000000000000064uL.toLong(), 0L, // 100 (10**2)
-        0x00000000000003E8uL.toLong(), 0L, // 1000 (10**3)
-        0x0000000000002710uL.toLong(), 0L, // 10000 (10**4)
-        0x00000000000186A0uL.toLong(), 0L, // 100000 (10**5)
-        0x00000000000F4240uL.toLong(), 0L, // 1000000 (10**6)
-        0x0000000000989680uL.toLong(), 0L, // 10000000 (10**7)
-        0x0000000005F5E100uL.toLong(), 0L, // 100000000 (10**8)
-        0x000000003B9ACA00uL.toLong(), 0L, // 1000000000 (10**9)
-        0x00000002540BE400uL.toLong(), 0L, // 10000000000 (10**10)
-        0x000000174876E800uL.toLong(), 0L, // 100000000000 (10**11)
-        0x000000E8D4A51000uL.toLong(), 0L, // 1000000000000 (10**12)
-        0x000009184E72A000uL.toLong(), 0L, // 10000000000000 (10**13)
-        0x00005AF3107A4000uL.toLong(), 0L, // 100000000000000 (10**14)
-        0x00038D7EA4C68000uL.toLong(), 0L, // 1000000000000000 (10**15)
-        0x002386F26FC10000uL.toLong(), 0L, // 10000000000000000 (10**16)
-        0x016345785D8A0000uL.toLong(), 0L, // 100000000000000000 (10**17)
-        0x0DE0B6B3A7640000uL.toLong(), 0L, // 1000000000000000000 (10**18)
-        0x8AC7230489E80000uL.toLong(), 0L, // 10000000000000000000 (10**19)
-        // minBitCount:64  maxBitCount:128
-        0x6BC75E2D63100000uL.toLong(), 0x0000000000000005uL.toLong(), // 10**20
-        0x35C9ADC5DEA00000uL.toLong(), 0x0000000000000036uL.toLong(), // 10**21
-        0x19E0C9BAB2400000uL.toLong(), 0x000000000000021EuL.toLong(), // 10**22
-        0x02C7E14AF6800000uL.toLong(), 0x000000000000152DuL.toLong(), // 10**23
-        0x1BCECCEDA1000000uL.toLong(), 0x000000000000D3C2uL.toLong(), // 10**24
-        0x161401484A000000uL.toLong(), 0x0000000000084595uL.toLong(), // 10**25
-        0xDCC80CD2E4000000uL.toLong(), 0x000000000052B7D2uL.toLong(), // 10**26
-        0x9FD0803CE8000000uL.toLong(), 0x00000000033B2E3CuL.toLong(), // 10**27
-        0x3E25026110000000uL.toLong(), 0x00000000204FCE5EuL.toLong(), // 10**28
-        0x6D7217CAA0000000uL.toLong(), 0x00000001431E0FAEuL.toLong(), // 10**29
-        0x4674EDEA40000000uL.toLong(), 0x0000000C9F2C9CD0uL.toLong(), // 10**30
-        0xC0914B2680000000uL.toLong(), 0x0000007E37BE2022uL.toLong(), // 10**31
-        0x85ACEF8100000000uL.toLong(), 0x000004EE2D6D415BuL.toLong(), // 10**32
-        0x38C15B0A00000000uL.toLong(), 0x0000314DC6448D93uL.toLong(), // 10**33
-        0x378D8E6400000000uL.toLong(), 0x0001ED09BEAD87C0uL.toLong(), // 10**34
-    )
-
-    /**
-     * Compute the bit-length of a 128-bit unsigned value: the position of
-     * the highest set bit, plus one. Returns 0 for the zero value.
-     */
-    private inline fun calcBitLen128(dw1: Long, dw0: Long): Int {
-        return if (dw1 != 0L) 128 - dw1.countLeadingZeroBits()
-        else if (dw0 != 0L) 64 - dw0.countLeadingZeroBits()
-        else 0
-    }
-
-    /**
-     * Compute the decimal digit count of a 128-bit unsigned value.
-     *
-     * Uses the standard `log10/log2` approximation: for any non-zero
-     * `bitLen`, `(bitLen * 1233) >>> 12` is `floor(bitLen * log10(2))`,
-     * which is either the exact digit count or one too small. A single
-     * unsigned 128-bit compare against the next-larger power of 10 in
-     * [POW10] resolves the off-by-one.
-     */
-    private inline fun calcDigitLen128(dw1: Long, dw0: Long): Int {
-        val bitLen = calcBitLen128(dw1, dw0)
-        val loDigitCount = (bitLen * 1233) ushr 12
-        val hiDigitCount = loDigitCount + 1
-        val pow10Offset = (loDigitCount shl 1)
-        val p1 = POW10[pow10Offset + 1]
-        val p0 = POW10[pow10Offset]
-        val cmp1 = unsignedCmp(dw1, p1)
-        if (cmp1 != 0)
-            return hiDigitCount - (cmp1 ushr 31)
-        val cmp0 = unsignedCmp(dw0, p0)
-        return hiDigitCount - (cmp0 ushr 31)
-    }
-
-    // -------- low level unsigned arithmetic functions --------------------------------------
-
-    /**
-     * Unsigned compare of two `Long` values, by flipping the sign bit
-     * before doing a signed compare.
-     */
-    private inline fun unsignedCmp(x: Long, y: Long): Int =
-        (x xor Long.MIN_VALUE).compareTo(y xor Long.MIN_VALUE)
-
-    /**
-     * Unsigned less-than test for two `Long` values.
-     */
-    private inline fun unsignedLT(x: Long, y: Long): Boolean =
-        (x xor Long.MIN_VALUE) < (y xor Long.MIN_VALUE)
-
-    /**
-     * Compute the high 64 bits of the 128-bit unsigned product `x * y`.
-     *
-     * Splits each operand into 32-bit halves, computes four 32×32 → 64
-     * partial products, and assembles the high 64 bits with proper carry
-     * propagation through the middle.
-     */
-    private inline fun mulhi64(x: Long, y: Long): Long {
-        val xLo = x and 0xFFFFFFFFL
-        val xHi = x ushr 32
-        val yLo = y and 0xFFFFFFFFL
-        val yHi = y ushr 32
-
-        val pp00 = xLo * yLo
-        val pp01 = xHi * yLo
-        val pp10 = xLo * yHi
-        val pp11 = xHi * yHi
-
-        val mid = pp01 + pp10  // may overflow
-        val midCarryShifted = if (unsignedLT(mid, pp01)) (1L shl 32) else 0L
-
-        val midWithLo = (pp00 ushr 32) + (mid and 0xFFFFFFFFL)
-        // midWithLo cannot overflow: max is (2^32-1) + (2^32-1) < 2^33
-
-        return pp11 + (mid ushr 32) + midCarryShifted + (midWithLo ushr 32)
-    }
-
-    /**
-     * Multiply a 128-bit unsigned value by `10^pow10` and add a 64-bit integer `a`,
-     * writing the 128-bit result into `out[0]` (high) and `out[1]` (low).
-     */
-    private inline fun u128FmaPow10(out: LongArray, x: Long, pow10: Int, a: Long) {
-        val y = POW10[pow10 shl 1]
-        val prodLo = x * y
-        val prodHi = mulhi64(x, y)
-        val sumLo = prodLo + a
-        val sumHi = prodHi + if (unsignedLT(sumLo, prodLo)) 1L else 0L
-        out[0] = sumHi
-        out[1] = sumLo
-    }
-
-    /**
-     * Divide a 128-bit unsigned coefficient by `10^precisionTruncationNeeded`,
-     * returning the quotient via [out] and the round-and-sticky
-     * residue class as the return value. Truncates in chunks of up to 9
-     * digits via [u113DivModPow10Max9].
-     */
-    private fun u128ScaleDownPow10(out: LongArray, dw1: Long, dw0: Long, precisionTruncationNeeded: Int): Int {
-        verify { (dw1 or dw0) != 0L }
-        verify { precisionTruncationNeeded > 0 && precisionTruncationNeeded < calcDigitLen128(dw1, dw0) }
-        var scaleResidue = EXACT
-        var dw1T = dw1
-        var dw0T = dw0
-        var digitsRemaining = precisionTruncationNeeded
-        do {
-            val stepPow10 = min(digitsRemaining, 9)
-            val rem = u113DivModPow10Max9(out, dw1T, dw0T, stepPow10)
-            dw1T = out[0]
-            dw0T = out[1]
-            val stepResidue = residueFromValuePow10(0L, rem, stepPow10)
-            scaleResidue = residueMerge(stepResidue, scaleResidue)
-            digitsRemaining -= stepPow10
-        } while (digitsRemaining > 0)
-        return scaleResidue
-    }
-
-    /**
-     * Divide a 113-bit unsigned coefficient by `10^pow10` for `pow10` in
-     * `1..9`. Factors `10^pow10` as `2^pow10 * 5^pow10`: the low `pow10`
-     * bits are extracted directly as the low part of the remainder, then
-     * the shifted value is divided by `5^pow10` using two hardware
-     * `Long` divides.
-     */
-    private fun u113DivModPow10Max9(quotLongs: LongArray, dwHi: Long, dwLo: Long, pow10: Int): Long {
-        verify { pow10 in 1..9 }
-        verify { dwHi.countLeadingZeroBits() >= 15 }
-
-        val mask = (1L shl pow10) - 1
-        val b = dwLo and mask
-        val sHi = dwHi ushr pow10
-        val sLo = (dwLo ushr pow10) or (dwHi shl (64 - pow10))
-
-        val k = 50 - pow10
-        val maskK = (1L shl k) - 1
-        val hi63 = (sHi shl (14 + pow10)) or (sLo ushr k)
-        val loK = sLo and maskK
-        // remember ... this POW10 table has 2 slots per power, so double the index
-        val d = POW10[pow10 shl 1] ushr pow10     // = 5^n
-        val q1 = hi63 / d
-        val r1 = hi63 % d
-        val mid = (r1 shl k) or loK
-        val q0 = mid / d
-        val r0 = mid % d
-
-        val qLo = (q1 shl k) + q0
-        val qHi = q1 ushr (14 + pow10)
-        val remainder = (r0 shl pow10) or b
-
-        quotLongs[0] = qHi
-        quotLongs[1] = qLo
-        return remainder
+    private fun encodeStringOrError(out: LongArray, formatIsBid: Boolean, str: String): String? {
+        var pos = 0
+        val chFirst = codeAt(str, pos++)
+        var ch = chFirst
+        val sign = ch == '-'.code
+        if (ch == '+'.code || ch == '-'.code)
+            ch = codeAt(str, pos++)
+        if (isDigit(ch) || ch == '.'.code)
+            return parseFiniteValueText(out, formatIsBid, sign, ch, str, pos)
+        val chLower = ch or 0x20
+        if (chLower == 'i'.code)
+            return parseInfinityText(out, sign, ch, str, pos)
+        if (chLower == 'n'.code || chLower == 's'.code || chLower == 'q'.code)
+            return parseNanText(out, formatIsBid, sign, ch, str, pos)
+        if (chFirst == -1)
+            return "EMPTY_STRING"
+        return "INVALID_FORMAT"
     }
 
 }
