@@ -2196,11 +2196,11 @@ object Decimal128TextCodec {
                 ch = codeAt(str, pos++)
             }
             if (accumDigitCount == 0)
-                return if (hasParen) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
+                return "FAILURE_PARSING_NAN"
             if (hasParen) {
                 // the ')' must be present and must end the input
                 if (ch != ')'.code)
-                    return if (ch == -1) "FAILURE_PARSING_NAN" else "FAILURE_PARSING_NAN"
+                    return "FAILURE_PARSING_NAN"
                 if (codeAt(str, pos++) != -1)
                     return "FAILURE_PARSING_NAN"
             } else if (ch != -1) {
