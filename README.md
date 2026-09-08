@@ -189,7 +189,7 @@ own Provenance. Two properties of this file are what they are because of the
 JVM, and are the usual reason a sibling diverges:
 
 - **Dwords are signed `Long`.** The JVM has no unsigned 64-bit type, which is
-  why the file carries `unsignedMulHi`, `unsignedLT`, `unsignedCmp` and `ushr`
+  why the file carries `unsignedLT`, `unsignedCmp` and `ushr`
   where a language with `u64` uses plain operators.
 - **The finalize chain writes through a `LongArray`** that doubles as scratch
   for the divide kernel. The ports with tuples or multi-return — Swift, C#, Go,
